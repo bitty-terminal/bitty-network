@@ -36,6 +36,17 @@
 //! caller overrides it per request. An expired deadline always surfaces
 //! [`NetworkError::Timeout`], including when the proxy or the origin stalls.
 //!
+//! Budgets: [`Request::max_body_bytes`] caps the response body when the
+//! caller sets one. The backend checks the declared `Content-Length` first
+//! (no body bytes are read when it already exceeds the cap) and then streams
+//! the body through a capped sink, so an over-long body fails closed with
+//! [`NetworkError::Budget`] instead of being buffered or truncated. With no
+//! cap set the body is read whole, as before. WebSocket message budgets are
+//! follow-up scope.
+//!
+//! [`Request::max_body_bytes`]: bitty_network_api::Request::max_body_bytes
+//! [`NetworkError::Budget`]: bitty_network_api::NetworkError::Budget
+//!
 //! Out of scope (issue #4): TLS custom CA (rustls platform verifier trusts
 //! the native root store as-is) and pooling tuning (reqwest defaults).
 //! WebSocket ([`NetworkService::websocket`]) stays fail-closed here unless
@@ -66,6 +77,7 @@
 //! assert!(service.request(&Request::get("https://other.example/")).is_err());
 //! ```
 
+use std::io::Write;
 use std::time::Duration;
 
 use bitty_network_api::{
@@ -295,14 +307,93 @@ impl HttpNetworkService {
                 Err(_) => return Err(NetworkError::Offline),
             }
         }
-        match incoming.bytes() {
+        match read_capped(incoming, request.max_body_bytes, timeout) {
             Ok(body) => Ok(Response {
                 status,
                 headers,
-                body: body.to_vec(),
+                body,
             }),
-            Err(error) => Err(classify_transport(&error, timeout)),
+            Err(error) => Err(error),
         }
+    }
+}
+
+/// Read one response body, enforcing the caller's byte budget.
+///
+/// With `limit` set, a declared `Content-Length` above the cap fails closed
+/// before any body byte is read, and the streamed copy below stops at the
+/// same [`NetworkError::Budget`] instead of buffering past it (nothing is
+/// truncated: the error replaces the whole body). Read failures keep the
+/// [`classify_transport`] mapping (expired deadlines surface the effective
+/// `after` deadline).
+///
+/// [`classify_transport`]: classify_transport
+fn read_capped(
+    mut incoming: reqwest::blocking::Response,
+    limit: Option<u64>,
+    after: Duration,
+) -> Result<Vec<u8>, NetworkError> {
+    let Some(limit) = limit else {
+        return match incoming.bytes() {
+            Ok(body) => Ok(body.to_vec()),
+            Err(error) => Err(classify_transport(&error, after)),
+        };
+    };
+    if let Some(declared) = incoming.content_length() {
+        if declared > limit {
+            return Err(NetworkError::Budget { limit_bytes: limit });
+        }
+    }
+    let mut capped = CappedBody::new(limit);
+    match incoming.copy_to(&mut capped) {
+        Ok(_) => Ok(capped.body),
+        Err(error) => {
+            if capped.exceeded {
+                Err(NetworkError::Budget { limit_bytes: limit })
+            } else {
+                Err(classify_transport(&error, after))
+            }
+        }
+    }
+}
+
+/// [`std::io::Write`] sink that refuses bytes past its budget.
+///
+/// [`read_capped`] streams the response through this sink so an over-long
+/// body fails closed: the first chunk that would cross `limit` flips
+/// `exceeded` and aborts the copy instead of buffering or truncating.
+struct CappedBody {
+    body: Vec<u8>,
+    limit: u64,
+    exceeded: bool,
+}
+
+impl CappedBody {
+    fn new(limit: u64) -> Self {
+        Self {
+            body: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for CappedBody {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let next = self.body.len() as u64 + buf.len() as u64;
+        if next > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::QuotaExceeded,
+                "response body exceeds budget",
+            ));
+        }
+        self.body.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -493,5 +584,80 @@ mod tests {
             HttpNetworkService::with_proxy(NetworkCapability::offline(), "://bad-url").err(),
             Some(NetworkError::Offline)
         );
+    }
+
+    /// Serve `body` once over loopback and return its URL.
+    ///
+    /// Binds an ephemeral port (never a fixed one); `with_length` decides
+    /// whether the response declares `Content-Length`, exercising the
+    /// pre-check and the chunked-read budget paths separately.
+    fn serve_once(body: &'static [u8], with_length: bool) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let port = listener.local_addr().expect("loopback addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("loopback accept");
+            let mut head = vec![0u8; 4096];
+            let _ = stream.read(&mut head);
+            let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n".to_vec();
+            if with_length {
+                response
+                    .extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+            }
+            response.extend_from_slice(b"\r\n");
+            response.extend_from_slice(body);
+            let _ = stream.write_all(&response);
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// Sixty-four bytes over the cap in both framing paths.
+    const OVER_BUDGET_BODY: &[u8] =
+        b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn budget_pre_check_rejects_declared_length() {
+        let url = serve_once(OVER_BUDGET_BODY, true);
+        let service =
+            HttpNetworkService::new(NetworkCapability::offline().with_domain("127.0.0.1"));
+        let request = Request::get(url).with_max_body_bytes(8);
+        assert_eq!(
+            service.request(&request),
+            Err(NetworkError::Budget { limit_bytes: 8 })
+        );
+    }
+
+    #[test]
+    fn budget_chunked_read_rejects_close_delimited_body() {
+        let url = serve_once(OVER_BUDGET_BODY, false);
+        let service =
+            HttpNetworkService::new(NetworkCapability::offline().with_domain("127.0.0.1"));
+        let request = Request::get(url).with_max_body_bytes(8);
+        assert_eq!(
+            service.request(&request),
+            Err(NetworkError::Budget { limit_bytes: 8 })
+        );
+    }
+
+    #[test]
+    fn budget_under_cap_returns_body_intact() {
+        let url = serve_once(OVER_BUDGET_BODY, true);
+        let service =
+            HttpNetworkService::new(NetworkCapability::offline().with_domain("127.0.0.1"));
+        let request = Request::get(url).with_max_body_bytes(1024);
+        let response = service.request(&request).expect("under-cap body");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, OVER_BUDGET_BODY);
+    }
+
+    #[test]
+    fn no_budget_reads_body_whole() {
+        let url = serve_once(OVER_BUDGET_BODY, false);
+        let service =
+            HttpNetworkService::new(NetworkCapability::offline().with_domain("127.0.0.1"));
+        let response = service.request(&Request::get(url)).expect("uncapped body");
+        assert_eq!(response.body, OVER_BUDGET_BODY);
     }
 }
