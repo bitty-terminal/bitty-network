@@ -1,0 +1,56 @@
+# Supply-chain approval for bitty-network (CTX-0003, issue #4).
+#
+# First real transport: reqwest 0.13.5 (exact pin in
+# crates/bitty-network/Cargo.toml, transitive pins in Cargo.lock).
+# The `http` feature graph is checked (features = ["http"] below) so the
+# reqwest tree is in view; the default graph stays dependency-free.
+#
+# Approved 2026-09-23 for CTX-0003:
+# - reqwest =0.13.5 (latest 0.13.x; rust-version 1.85 matches MSRV 1.85;
+#   `blocking` fits the sync NetworkService; shared Client pools
+#   connections; default-features OFF to skip charset/HTTP-2/OS system-proxy
+#   magic and keep proxy handling explicit in src/http.rs).
+# - TLS via reqwest `rustls` feature: rustls 0.23.45 + rustls-platform-verifier
+#   0.7.0 (pure Rust, no OpenSSL system dependency; native roots from the
+#   platform verifier), crypto from aws-lc-rs 1.18.1.
+# - Transports: hyper 1.11.1 + hyper-util 0.1.20 over tokio 1.53.1
+#   (reqwest blocking owns its runtime internally; no async in our code).
+# Run `cargo deny check` to verify; CI enforces it (Supply chain job).
+
+[graph]
+# Check the http-feature graph so the reqwest tree is always in view.
+features = ["http"]
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    # Mozilla CA root data pulled by rustls-platform-verifier as its
+    # fallback trust store (webpki-root-certs); data-only license.
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# Duplicate versions inherited from the reqwest 0.13.5 tree that no direct
+# requirement of ours can unify (checked 2026-09-23):
+# - base64 0.22.1 alongside 0.23.1 (rustls-pemfile vs hyper/reqwest core).
+# - syn 2.0.119 alongside syn 3.0.6 (derive-macro ecosystems in transition).
+# Skipped, not denied: unifying them is upstream's release to make.
+skip = [
+    { crate = "base64@0.22.1", reason = "reqwest-tree dupe, upstream unification pending" },
+    { crate = "syn@2.0.119", reason = "reqwest-tree dupe, upstream unification pending" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
