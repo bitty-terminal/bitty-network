@@ -1,0 +1,16 @@
+# bitty-network: workspace identity descriptor (kind/lang/role mirror workspace.toml).
+[repo]
+name = "bitty-network"
+kind = "extension"
+lang = "rust"
+role = "L1 Rust Core Extension: shared optional network runtime (api + impl), default-off"
+owner = "bitty-core"
+docs = "bitty-terminal-docs"
+
+[contracts.provides]
+network-api = "crates/bitty-network-api" # light contract: Request/Response/Error/capability defs/service traits, zero impl deps
+network-impl = "crates/bitty-network" # optional runtime: transport/protocol/TLS/DNS/policy behind default-off features
+
+[contracts.consumes]
+core-ontology = "bitty-docs: ADR-0013" # Panel/Execution identity terms reused in capability audit records
+trust-tiers = "bitty #1304: OQ-085 L0-L4" # NetworkCapability allowlist+consent+audit plugs into the adopted tier matrix
