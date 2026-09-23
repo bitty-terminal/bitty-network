@@ -7,11 +7,15 @@
 //! fails closed with [`NetworkError::Offline`] because this backend moves no
 //! bytes. Sockets, transports, and wire code arrive in a follow-up task.
 //!
-//! Feature gates: `client` and `http` resolve to this backend through the
-//! [`OfflineNetworkService::client`] / [`OfflineNetworkService::http`]
-//! constructors when those features are enabled. Every other gate (`server`,
-//! `websocket`, `quic`, `proxy`, `oauth`) stays fail-closed: the embedded
-//! backend is the only resolution and it performs no I/O under any of them.
+//! Feature gates: `client` resolves to this backend through the
+//! [`OfflineNetworkService::client`] constructor when that feature is
+//! enabled. The `http` gate keeps its [`OfflineNetworkService::http`]
+//! constructor for the fail-closed resolution, and additionally enables the
+//! real transport in `crate::http`: prefer
+//! `crate::http::HttpNetworkService` when the `http` feature is on and
+//! moving bytes is intended. Every other gate (`server`, `websocket`,
+//! `quic`, `proxy`, `oauth`) stays fail-closed: the embedded backend is the
+//! only resolution and it performs no I/O under any of them.
 //!
 //! [`NetworkService`]: bitty_network_api::NetworkService
 //! [`NetworkCapability`]: bitty_network_api::NetworkCapability
@@ -99,7 +103,9 @@ impl OfflineNetworkService {
     /// Resolve the offline backend for the `http` protocol.
     ///
     /// Only available with the `http` feature; behavior is identical to
-    /// [`OfflineNetworkService::new`] (fail-closed, no wire code).
+    /// [`OfflineNetworkService::new`] (fail-closed, no wire code). This is
+    /// the stay-offline resolution — for the real transport behind the same
+    /// gate see `crate::http::HttpNetworkService`.
     #[cfg(feature = "http")]
     #[must_use]
     pub fn http(capability: NetworkCapability) -> Self {

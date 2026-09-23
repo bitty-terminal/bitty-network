@@ -8,10 +8,11 @@ Bitty L1 Rust Core Extension: the shared, optional network runtime.
 - `crates/bitty-network` — the real implementation (async runtime, transport,
   HTTP/WebSocket, TLS, DNS, proxy, policy) behind default-off Cargo features.
 
-Status: shell only. No sockets, no network dependencies yet. The default
-`bitty` binary stays network-free; this runtime enters only when a
-network-capable consumer (AI provider, weather/GitHub/mail plugin, remote
-panel) is installed. Full direction:
+Status: offline backend plus the first real transport. The default
+`bitty` binary stays network-free; the `http` feature (default-off) enables
+the embedded HTTP backend (supply-chain approval in `deny.toml`). This
+runtime enters only when a network-capable consumer (AI provider,
+weather/GitHub/mail plugin, remote panel) is installed. Full direction:
 `bitty-terminal-docs` `specifications/bitty-network-candidate.md` (#111).
 
 ## Layout

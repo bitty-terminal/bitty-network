@@ -9,16 +9,19 @@
 
 `bitty-network` is the implementation behind `bitty-network-api`: an
 embedded offline `NetworkService` (`offline`, capability-first and
-fail-closed) plus a module skeleton (`runtime`, `transport`, `protocol`,
-`tls`, `dns`, `policy`) holding marker types only. Sockets arrive in a
-follow-up task (see the sealing note in `src/lib.rs`).
+fail-closed), a first real HTTP transport (`http`, behind the default-off
+`http` feature), plus a module skeleton (`runtime`, `transport`, `protocol`,
+`tls`, `dns`, `policy`) holding marker types only. Sockets beyond plain HTTP
+arrive in a follow-up task (see the sealing note in `src/lib.rs`).
 
 ## Embedded-first, networkd-later
 
 The terminal stays embedded-first: no network daemon today, no background
 tasks, no ambient connectivity. A `networkd` out-of-process owner may arrive
-later; until then every consumer starts offline and this crate moves no
-bytes. Its only dependency is the path-local `bitty-network-api` vocabulary.
+later; until then every consumer starts offline, and only the default-off
+`http` feature moves bytes (via `src/http.rs`). Its only dependencies are
+the path-local `bitty-network-api` vocabulary plus, behind `http`, the
+pinned reqwest tree (see `deny.toml` for the supply-chain approval).
 
 ## API-stable promise
 
@@ -30,19 +33,22 @@ never as a direct dependency.
 
 ## Features
 
-All default-off, all empty (no new dependencies yet):
+All default-off. Only `http` carries dependencies (reqwest `=0.13.5`,
+exact pin in `Cargo.toml`, approval in `deny.toml`):
 
 - `client`, `server` — initiator/listener roles (`client` resolves to the
   offline backend; `server` stays fail-closed).
-- `http`, `websocket` — protocol wire code (`http` resolves to the offline
-  backend; `websocket` stays fail-closed).
+- `http`, `websocket` — protocol wire code (`http` enables the real
+  `HttpNetworkService` and keeps the offline resolution alongside it;
+  `websocket` stays fail-closed).
 - `quic` — QUIC transport (fail-closed).
 - `proxy`, `oauth` — egress policy and credential flows (fail-closed).
 
 ## Boundaries
 
-- One dependency: `bitty-network-api` via path; `std` otherwise.
-- No I/O, no sockets, no background tasks.
+- Dependencies: `bitty-network-api` via path everywhere; the reqwest tree
+  only behind the default-off `http` feature (`std` otherwise).
+- No I/O, no sockets, no background tasks outside `src/http.rs` (gated).
 - Zero `unsafe`, per the workspace lint and `src/lib.rs`.
 
 ## Layout
