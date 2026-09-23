@@ -1,0 +1,14 @@
+[package]
+name = "bitty-network-api"
+description = "Bitty stable network vocabulary — requests, capability, errors, and service trait (no implementation, no dependencies)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "capability", "offline", "bitty"]
+categories = ["network-programming"]
+publish = true
+
+[lints]
+workspace = true
