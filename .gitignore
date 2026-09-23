@@ -1,3 +1,5 @@
 /target/
 .targets/
 **/target/
+.carryctx/config.local.toml
+.worktrees/
