@@ -129,8 +129,8 @@ pub enum NetworkError {
         /// Deadline that expired.
         after: Duration,
     },
-    /// An allowed operation would exceed its transfer budget; reserved for
-    /// the socket follow-up.
+    /// An allowed operation would exceed its transfer budget; produced by
+    /// backends enforcing [`Request::max_body_bytes`].
     Budget {
         /// Budget that would be exceeded, in bytes.
         limit_bytes: u64,
@@ -190,6 +190,12 @@ pub struct Request {
     pub body: Vec<u8>,
     /// Per-request deadline, when the caller sets one.
     pub timeout: Option<Duration>,
+    /// Response body cap in bytes, when the caller sets one.
+    ///
+    /// Enforced fail-closed by backends that move bytes: a response larger
+    /// than the cap yields [`NetworkError::Budget`] instead of a truncated
+    /// body. `None` (the default) means no cap.
+    pub max_body_bytes: Option<u64>,
 }
 
 impl Request {
@@ -202,6 +208,7 @@ impl Request {
             headers: Vec::new(),
             body: Vec::new(),
             timeout: None,
+            max_body_bytes: None,
         }
     }
 
@@ -214,6 +221,7 @@ impl Request {
             headers: Vec::new(),
             body: body.into(),
             timeout: None,
+            max_body_bytes: None,
         }
     }
 
@@ -228,6 +236,15 @@ impl Request {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Set the response body cap in bytes (builder style).
+    ///
+    /// See [`Request::max_body_bytes`]; `None` is the default (no cap).
+    #[must_use]
+    pub fn with_max_body_bytes(mut self, limit_bytes: u64) -> Self {
+        self.max_body_bytes = Some(limit_bytes);
         self
     }
 
@@ -448,7 +465,8 @@ mod tests {
     fn request_builders_carry_intent() {
         let request = Request::get("https://example.com/path")
             .with_header("Accept", "text/plain")
-            .with_timeout(Duration::from_secs(5));
+            .with_timeout(Duration::from_secs(5))
+            .with_max_body_bytes(1024);
         assert_eq!(request.method, HttpMethod::Get);
         assert_eq!(request.host(), "example.com");
         assert_eq!(
@@ -456,11 +474,13 @@ mod tests {
             vec![("Accept".to_owned(), "text/plain".to_owned())]
         );
         assert_eq!(request.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(request.max_body_bytes, Some(1024));
 
         let post = Request::post("http://example.com:8080/submit", vec![1, 2]);
         assert_eq!(post.method, HttpMethod::Post);
         assert_eq!(post.host(), "example.com");
         assert_eq!(post.body, vec![1, 2]);
+        assert_eq!(post.max_body_bytes, None);
     }
 
     #[test]
