@@ -263,6 +263,11 @@ fn explicit_proxy_routes_through_proxy() {
     origin.stop_and_join();
 }
 
+/// Without the `websocket` feature the handshake stays fail-closed: even an
+/// allowed host yields `Offline` (no upgrade path), and capability misses
+/// surface the typed denial without touching a socket. With the feature on
+/// this behavior moves to `tests/websocket.rs`.
+#[cfg(not(feature = "websocket"))]
 #[test]
 fn websocket_stays_fail_closed() {
     let allowed = allow_loopback();
@@ -275,6 +280,21 @@ fn websocket_stays_fail_closed() {
     assert_eq!(
         capped.websocket(&WebSocketRequest::new("ws://other.example/socket")),
         Err(NetworkError::Denied {
+            domain: "other.example".to_owned()
+        })
+    );
+}
+
+/// Capability-denied handshakes never send, with or without the
+/// `websocket` feature (the check runs before any socket work).
+#[test]
+fn websocket_denied_never_sends() {
+    let capped = HttpNetworkService::new(NetworkCapability::offline().with_domain("example.com"));
+    assert_eq!(
+        capped
+            .websocket(&WebSocketRequest::new("ws://other.example/socket"))
+            .err(),
+        Some(NetworkError::Denied {
             domain: "other.example".to_owned()
         })
     );

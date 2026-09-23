@@ -23,13 +23,25 @@ bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
 # verifier for native roots) and proxy comes from HTTPS_PROXY/NO_PROXY,
 # read explicitly in `src/http.rs` so behavior stays observable and tested.
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "rustls"], optional = true }
+# WebSocket transport slice (CTX-0004, issue #7): sync tungstenite client
+# behind the default-off `websocket` feature. Exact pin in exactly one place
+# (here); transitive pins live in the workspace Cargo.lock; license/source
+# approval lives in deny.toml. Default features are OFF on purpose: the
+# `handshake` feature is enabled explicitly and TLS is rustls with native
+# roots (pure Rust, no OpenSSL system dependency — same trust approach as
+# the `http` backend: the platform root store, no custom CA). The `url`
+# feature stays off: URL parsing is a few lines of best-effort splitting in
+# `src/websocket.rs`, same as `Request::host`.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"], optional = true }
 
 [features]
 default = []
 client = []
 server = []
 http = ["dep:reqwest"]
-websocket = []
+# The WebSocket handshake reuses the `http` backend (capability ownership,
+# proxy decision, service type), so the feature implies `http`.
+websocket = ["dep:tungstenite", "http"]
 quic = []
 proxy = []
 oauth = []

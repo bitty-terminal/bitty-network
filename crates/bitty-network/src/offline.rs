@@ -13,7 +13,8 @@
 //! constructor for the fail-closed resolution, and additionally enables the
 //! real transport in `crate::http`: prefer
 //! `crate::http::HttpNetworkService` when the `http` feature is on and
-//! moving bytes is intended. Every other gate (`server`, `websocket`,
+//! moving bytes is intended. The `websocket` gate (which implies `http`)
+//! enables the handshake on that same backend; every other gate (`server`,
 //! `quic`, `proxy`, `oauth`) stays fail-closed: the embedded backend is the
 //! only resolution and it performs no I/O under any of them.
 //!
