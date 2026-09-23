@@ -7,10 +7,11 @@
 
 ## Purpose
 
-`bitty-network` is the implementation shell behind `bitty-network-api`: a
-module skeleton (`runtime`, `transport`, `protocol`, `tls`, `dns`, `policy`)
-holding marker types only. Shell only — sockets arrive in a follow-up task
-(see the sealing note in `src/lib.rs`).
+`bitty-network` is the implementation behind `bitty-network-api`: an
+embedded offline `NetworkService` (`offline`, capability-first and
+fail-closed) plus a module skeleton (`runtime`, `transport`, `protocol`,
+`tls`, `dns`, `policy`) holding marker types only. Sockets arrive in a
+follow-up task (see the sealing note in `src/lib.rs`).
 
 ## Embedded-first, networkd-later
 
@@ -31,10 +32,12 @@ never as a direct dependency.
 
 All default-off, all empty (no new dependencies yet):
 
-- `client`, `server` — initiator/listener roles.
-- `http`, `websocket` — protocol wire code.
-- `quic` — QUIC transport.
-- `proxy`, `oauth` — egress policy and credential flows.
+- `client`, `server` — initiator/listener roles (`client` resolves to the
+  offline backend; `server` stays fail-closed).
+- `http`, `websocket` — protocol wire code (`http` resolves to the offline
+  backend; `websocket` stays fail-closed).
+- `quic` — QUIC transport (fail-closed).
+- `proxy`, `oauth` — egress policy and credential flows (fail-closed).
 
 ## Boundaries
 
@@ -46,7 +49,11 @@ All default-off, all empty (no new dependencies yet):
 
 - `Cargo.toml` — package metadata, path dependency on `-api`, empty
   default-off features.
-- `src/lib.rs` — shell docs plus `-api` re-exports.
+- `src/lib.rs` — backend docs plus `-api` re-exports.
+- `src/offline.rs` — embedded offline `NetworkService` (`OfflineNetworkService`,
+  `OfflineSocket`); capability checked first, everything else fail-closed.
+- `tests/offline.rs` — acceptance tests (deny-all, allowlist hit/miss,
+  offline response, feature-gate presence).
 - `src/runtime.rs` — executor-ownership marker.
 - `src/transport.rs` — TCP/UDP/QUIC markers.
 - `src/protocol.rs` — HTTP/WS markers.

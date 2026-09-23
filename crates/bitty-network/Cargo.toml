@@ -1,6 +1,6 @@
 [package]
 name = "bitty-network"
-description = "Bitty network implementation shell — module skeleton only, sockets arrive in a follow-up"
+description = "Bitty network implementation — embedded offline NetworkService with capability-first enforcement; sockets arrive in a follow-up"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
