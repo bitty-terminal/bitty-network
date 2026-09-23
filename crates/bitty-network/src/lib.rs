@@ -1,14 +1,18 @@
 //! `bitty-network`: network implementation with an embedded offline backend
-//! and, behind the default-off `http` feature, a first real HTTP transport.
+//! and, behind the default-off `http` and `websocket` features, real HTTP
+//! and WebSocket transports.
 //!
 //! This crate owns the modules behind [`NetworkService`]: [`offline`],
-//! [`http`] (only with the `http` feature), [`runtime`], [`transport`],
+//! [`http`] (only with the `http` feature), [`websocket`] (only with the
+//! `websocket` feature, which implies `http`), [`runtime`], [`transport`],
 //! [`protocol`], [`tls`], [`dns`], and [`policy`]. [`offline`] serves the
 //! trait with a capability-first, fail-closed backend (no sockets);
 //! [`http`] serves it with a shared-client HTTP backend (capability-first,
-//! proxy from the environment, per-request timeouts). The remaining modules
-//! hold marker types so follow-up tasks have a stable place to land
-//! transports, TLS, DNS, and runtime ownership without reshaping the tree.
+//! proxy from the environment, per-request timeouts) and, with `websocket`,
+//! with a capability-gated handshake returning an open socket. The
+//! remaining modules hold marker types so follow-up tasks have a stable
+//! place to land transports, TLS, DNS, and runtime ownership without
+//! reshaping the tree.
 //!
 //! The stable vocabulary (`Request`, `WebSocketRequest`, `NetworkCapability`,
 //! `NetworkError`, [`NetworkService`] itself) lives in `bitty-network-api`
@@ -19,15 +23,16 @@
 //!
 //! # Sealing note
 //!
-//! Sockets beyond plain HTTP arrive in a follow-up task. The [`offline`]
-//! backend performs no I/O, opens no sockets, spawns no background tasks,
-//! and takes no network dependencies (its only dependency is the path-local
-//! `bitty-network-api` vocabulary): every allowed request fails closed with
-//! [`NetworkError::Offline`], and capability misses surface the typed
-//! denial. The [`http`] backend (feature-gated, default-off) is the only
-//! module that moves bytes; everything else keeps the offline promise.
-//! Anything that needs the network today must still go through its existing
-//! path unless it opts into the `http` feature explicitly.
+//! Sockets arrive through the `http` and `websocket` features. The
+//! [`offline`] backend performs no I/O, opens no sockets, spawns no
+//! background tasks, and takes no network dependencies (its only dependency
+//! is the path-local `bitty-network-api` vocabulary): every allowed request
+//! fails closed with [`NetworkError::Offline`], and capability misses
+//! surface the typed denial. The [`http`] backend (feature-gated,
+//! default-off) is the only module that moves bytes; everything else keeps
+//! the offline promise. Anything that needs the network today must still go
+//! through its existing path unless it opts into the `http` (or
+//! `websocket`) feature explicitly.
 //!
 //! # Example
 //!
@@ -53,10 +58,14 @@ pub mod protocol;
 pub mod runtime;
 pub mod tls;
 pub mod transport;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
 #[cfg(feature = "http")]
 pub use crate::http::HttpNetworkService;
 pub use crate::offline::{OfflineNetworkService, OfflineSocket};
+#[cfg(feature = "websocket")]
+pub use crate::websocket::{WebSocketSocket, WsMessage};
 pub use bitty_network_api::{
     HttpMethod, NetworkCapability, NetworkError, NetworkService, OfflineFirst, Request, Response,
     WebSocketRequest,

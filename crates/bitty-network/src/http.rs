@@ -37,10 +37,14 @@
 //! [`NetworkError::Timeout`], including when the proxy or the origin stalls.
 //!
 //! Out of scope (issue #4): TLS custom CA (rustls platform verifier trusts
-//! the native root store as-is), pooling tuning (reqwest defaults), and
-//! WebSocket ([`NetworkService::websocket`] stays fail-closed here —
-//! capability misses surface the typed denial, allowlist hits yield
-//! [`NetworkError::Offline`] because there is no upgrade path yet).
+//! the native root store as-is) and pooling tuning (reqwest defaults).
+//! WebSocket ([`NetworkService::websocket`]) stays fail-closed here unless
+//! the `websocket` feature is enabled: without it, capability misses surface
+//! the typed denial and allowlist hits yield [`NetworkError::Offline`]
+//! because there is no upgrade path. With `websocket` enabled the handshake
+//! runs through `crate::websocket` (capability-first, proxy decision
+//! reused from this backend, rustls native roots) and returns an open
+//! `WebSocketSocket`.
 //!
 //! [`NetworkService`]: bitty_network_api::NetworkService
 //! [`NetworkCapability::check`]: bitty_network_api::NetworkCapability::check
@@ -70,6 +74,10 @@ use bitty_network_api::{
 };
 use reqwest::header::{HeaderName, HeaderValue};
 
+/// Only the fail-closed `websocket()` (without the `websocket` feature)
+/// resolves to the offline socket; with the feature the socket comes from
+/// `crate::websocket`.
+#[cfg(not(feature = "websocket"))]
 use crate::offline::OfflineSocket;
 
 /// Default per-request deadline when the caller sets no [`Request::timeout`].
@@ -214,7 +222,30 @@ impl HttpNetworkService {
         }
     }
 
+    /// The proxy URL selected for `host`, if any: the configured proxy that
+    /// is not bypassed for this host. Mirrors the per-request egress choice
+    /// in [`client_for`](Self::client_for) so the WebSocket handshake tunnels
+    /// through exactly the proxy a plain request would use.
+    ///
+    /// Only available with the `websocket` feature; the handshake path in
+    /// `crate::websocket` consumes it.
+    #[cfg(feature = "websocket")]
+    pub(crate) fn proxy_url_for(&self, host: &str) -> Option<String> {
+        match self.egress.via_proxy.as_ref() {
+            Some(_) => select_proxy(
+                self.egress.https_proxy.as_deref(),
+                &self.egress.no_proxy,
+                host,
+            ),
+            None => None,
+        }
+    }
+
     /// Capability-first rejection for `domain` (mirrors the offline backend).
+    ///
+    /// Only used by the fail-closed `websocket()` without the `websocket`
+    /// feature; with the feature the capability check runs inline.
+    #[cfg(not(feature = "websocket"))]
     fn reject(&self, domain: &str) -> NetworkError {
         match self.capability.check(domain) {
             Ok(()) => NetworkError::Offline,
@@ -283,6 +314,9 @@ impl Default for HttpNetworkService {
 }
 
 impl NetworkService for HttpNetworkService {
+    #[cfg(feature = "websocket")]
+    type Socket = crate::websocket::WebSocketSocket;
+    #[cfg(not(feature = "websocket"))]
     type Socket = OfflineSocket;
 
     fn request(&self, request: &Request) -> Result<Response, NetworkError> {
@@ -290,6 +324,17 @@ impl NetworkService for HttpNetworkService {
         self.send(request)
     }
 
+    /// Capability-gated handshake: without the `websocket` feature this
+    /// stays fail-closed (offline on allowlist hits, typed denial
+    /// otherwise); with the feature an allowed host performs the handshake
+    /// in `crate::websocket` and returns the open socket.
+    #[cfg(feature = "websocket")]
+    fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
+        self.capability.check(request.host())?;
+        crate::websocket::connect(request, self.proxy_url_for(request.host()).as_deref())
+    }
+
+    #[cfg(not(feature = "websocket"))]
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
         Err(self.reject(request.host()))
     }

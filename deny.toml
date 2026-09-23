@@ -1,9 +1,11 @@
-# Supply-chain approval for bitty-network (CTX-0003, issue #4).
+# Supply-chain approval for bitty-network (CTX-0003, issue #4; CTX-0004,
+# issue #7).
 #
 # First real transport: reqwest 0.13.5 (exact pin in
 # crates/bitty-network/Cargo.toml, transitive pins in Cargo.lock).
-# The `http` feature graph is checked (features = ["http"] below) so the
-# reqwest tree is in view; the default graph stays dependency-free.
+# The `http` + `websocket` feature graphs are checked (features below) so
+# the reqwest and tungstenite trees are always in view; the default graph
+# stays dependency-free.
 #
 # Approved 2026-09-23 for CTX-0003:
 # - reqwest =0.13.5 (latest 0.13.x; rust-version 1.85 matches MSRV 1.85;
@@ -15,11 +17,24 @@
 #   platform verifier), crypto from aws-lc-rs 1.18.1.
 # - Transports: hyper 1.11.1 + hyper-util 0.1.20 over tokio 1.53.1
 #   (reqwest blocking owns its runtime internally; no async in our code).
+#
+# Approved 2026-09-23 for CTX-0004:
+# - tungstenite =0.30.0 (latest 0.30.x; rust-version 1.85 matches MSRV 1.85;
+#   sync handshake fits the blocking NetworkService; default-features OFF,
+#   `handshake` enabled explicitly, TLS via `rustls-tls-native-roots`:
+#   rustls 0.23.45 unified with the reqwest tree, native roots from the
+#   platform store, crypto from the same aws-lc-rs 1.18.1. No new TLS stack.)
+# - New transitive crates, all single-version and unified where shared:
+#   sha1 0.11.0 (+ digest 0.11.3 / crypto-common / block-buffer const
+#   generics), data-encoding 2.11.1, rustls-native-certs 0.8.4; http 1.5.0,
+#   httparse 1.10.1, rustls 0.23.45, rand 0.10.3, thiserror 2.0.20 all
+#   unify with the reqwest tree (no new duplicate versions).
 # Run `cargo deny check` to verify; CI enforces it (Supply chain job).
 
 [graph]
-# Check the http-feature graph so the reqwest tree is always in view.
-features = ["http"]
+# Check the http- and websocket-feature graphs so the reqwest and
+# tungstenite trees are always in view.
+features = ["http", "websocket"]
 
 [advisories]
 yanked = "deny"
