@@ -53,6 +53,13 @@ impl Probe {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // Accepted sockets inherit the listener's
+                        // non-blocking mode on Windows and macOS (Linux
+                        // clears it): restore blocking mode so the read
+                        // timeout in `read_head` actually blocks.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream blocking");
                         thread_hits.fetch_add(1, Ordering::SeqCst);
                         let head = read_head(stream.try_clone().expect("clone probe stream"));
                         if let Ok(mut guard) = thread_first.lock() {

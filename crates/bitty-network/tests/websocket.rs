@@ -57,6 +57,13 @@ impl WsServer {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // Accepted sockets inherit the listener's
+                        // non-blocking mode on Windows and macOS (Linux
+                        // clears it): restore blocking mode so the read
+                        // timeouts below actually block.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream blocking");
                         thread_hits.fetch_add(1, Ordering::SeqCst);
                         let echoed = Arc::clone(&thread_echoed);
                         thread::spawn(move || serve_echo(stream, &echoed));
@@ -146,6 +153,11 @@ impl SilentProbe {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // See WsServer: accepted sockets inherit
+                        // non-blocking mode on Windows and macOS.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream blocking");
                         thread_hits.fetch_add(1, Ordering::SeqCst);
                         thread::spawn(move || {
                             thread::sleep(Duration::from_secs(2));
@@ -206,6 +218,11 @@ impl ConnectProxy {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // See WsServer: accepted sockets inherit
+                        // non-blocking mode on Windows and macOS.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream blocking");
                         let line = Arc::clone(&thread_line);
                         thread::spawn(move || serve_connect(stream, &line));
                     }
