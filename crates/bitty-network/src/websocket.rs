@@ -4,10 +4,11 @@
 //! WebSocket dependency) and returns the open [`WebSocketSocket`]. The
 //! handshake path, in order:
 //!
-//! 1. The caller ([`HttpNetworkService::websocket`]) checks the capability
-//!    on [`WebSocketRequest::host`] FIRST: deny-all yields
-//!    [`NetworkError::Offline`], an allowlist miss yields the typed
-//!    [`NetworkError::Denied`], and no socket is touched in either case.
+//! 1. The caller ([`HttpNetworkService::websocket`]) runs
+//!    `bitty_network_api::NetworkCapability::check_handshake` (host, then
+//!    port) FIRST: deny-all yields [`NetworkError::Offline`], an allowlist
+//!    miss yields the typed [`NetworkError::Denied`], and no socket is
+//!    touched in either case. Portless handshakes fail closed.
 //! 2. The target is parsed from the URL (`ws`/`wss` only; anything else
 //!    fails closed as [`NetworkError::Offline`]). The default ports are 80
 //!    for `ws` and 443 for `wss`.

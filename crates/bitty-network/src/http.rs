@@ -8,10 +8,11 @@
 //!
 //! Request path, in order:
 //!
-//! 1. Capability first: [`NetworkCapability::check`] on [`Request::host`]
-//!    runs before the client, the URL, or any socket is touched. Deny-all
-//!    yields [`NetworkError::Offline`], an allowlist miss yields the typed
-//!    [`NetworkError::Denied`], and nothing is sent in either case.
+//! 1. Capability first: [`NetworkCapability::check_request`] (host, port,
+//!    then method) runs before the client, the URL, or any socket is
+//!    touched. Deny-all yields [`NetworkError::Offline`], an allowlist miss
+//!    yields the typed [`NetworkError::Denied`], and nothing is sent in
+//!    either case. Portless requests fail closed; see `Request::port`.
 //! 2. The request is translated (method, URL, headers, body) and sent with
 //!    the per-request deadline ([`Request::timeout`]) or
 //!    [`DEFAULT_REQUEST_TIMEOUT`] when the caller sets none.
@@ -241,13 +242,13 @@ impl HttpNetworkService {
         }
     }
 
-    /// Capability-first rejection for `domain` (mirrors the offline backend).
+    /// Capability-first rejection for `request` (mirrors the offline backend).
     ///
     /// Only used by the fail-closed `websocket()` without the `websocket`
     /// feature; with the feature the capability check runs inline.
     #[cfg(not(feature = "websocket"))]
-    fn reject(&self, domain: &str) -> NetworkError {
-        match self.capability.check(domain) {
+    fn reject(&self, request: &WebSocketRequest) -> NetworkError {
+        match self.capability.check_handshake(request) {
             Ok(()) => NetworkError::Offline,
             Err(error) => error,
         }
@@ -320,7 +321,7 @@ impl NetworkService for HttpNetworkService {
     type Socket = OfflineSocket;
 
     fn request(&self, request: &Request) -> Result<Response, NetworkError> {
-        self.capability.check(request.host())?;
+        self.capability.check_request(request)?;
         self.send(request)
     }
 
@@ -330,13 +331,13 @@ impl NetworkService for HttpNetworkService {
     /// in `crate::websocket` and returns the open socket.
     #[cfg(feature = "websocket")]
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
-        self.capability.check(request.host())?;
+        self.capability.check_handshake(request)?;
         crate::websocket::connect(request, self.proxy_url_for(request.host()).as_deref())
     }
 
     #[cfg(not(feature = "websocket"))]
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
-        Err(self.reject(request.host()))
+        Err(self.reject(request))
     }
 }
 
