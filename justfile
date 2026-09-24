@@ -15,3 +15,16 @@ test:
 
 typecheck:
     cargo check --workspace --all-targets --locked
+
+check-http:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --locked --features http -- -D warnings
+    cargo test --workspace --all-targets --locked --features http
+
+check-websocket:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --locked --features http,websocket -- -D warnings
+    cargo test --workspace --all-targets --locked --features http,websocket
+
+actionlint:
+    actionlint -color
