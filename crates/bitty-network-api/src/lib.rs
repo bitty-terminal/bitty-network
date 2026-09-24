@@ -34,7 +34,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -45,9 +45,32 @@ use std::time::Duration;
 /// per domain with [`NetworkCapability::with_domain`]; there is no wildcard.
 /// Matching is exact on the lowercased host, so `example.com` never covers
 /// `sub.example.com` — each name must be listed.
+///
+/// Per-host ports ([`NetworkCapability::with_domain_ports`]) and HTTP methods
+/// ([`NetworkCapability::restrict_methods`]) narrow a grant further. A domain
+/// with no port entry allows every port (the legacy [`with_domain`] grant);
+/// once a port entry exists, only listed ports pass. A method restriction is
+/// additive: once any method is listed, only listed methods pass. Both layers
+/// fail closed.
+///
+/// # Cross-repo contract (bitty manifest egress)
+///
+/// The bitty host owns the plugin-manifest egress table
+/// (`[[network.egress]]` with `host` + `ports`, paired with
+/// `network.connect:HOST[:PORT]` capabilities; see
+/// `bitty-terminal/bitty#1335`). The host intersects the plugin's effective
+/// grants with that table and hands the result to this crate as a
+/// `NetworkCapability`; this crate enforces the handed grant (host, port,
+/// method) and never widens it. Grants here are client-initiated egress
+/// only: there is no API that permits listening, so a listen path can never
+/// be granted by construction.
+///
+/// [`with_domain`]: NetworkCapability::with_domain
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkCapability {
     allowed_domains: HashSet<String>,
+    allowed_ports: HashMap<String, HashSet<u16>>,
+    allowed_methods: Option<HashSet<HttpMethod>>,
 }
 
 impl NetworkCapability {
@@ -90,6 +113,129 @@ impl NetworkCapability {
             Err(NetworkError::Denied {
                 domain: normalize_domain(domain),
             })
+        }
+    }
+
+    /// Allow `domain` on exactly `ports` (builder style).
+    ///
+    /// Implies [`NetworkCapability::with_domain`]: the domain is added to the
+    /// allowlist and its port entry is replaced with `ports`. An empty `ports`
+    /// denies every port on that domain (fail closed); a domain with no port
+    /// entry (the plain [`with_domain`] grant) allows every port.
+    ///
+    /// [`with_domain`]: NetworkCapability::with_domain
+    #[must_use]
+    pub fn with_domain_ports(
+        mut self,
+        domain: impl Into<String>,
+        ports: impl IntoIterator<Item = u16>,
+    ) -> Self {
+        let normalized = normalize_domain(domain.into());
+        self.allowed_domains.insert(normalized.clone());
+        self.allowed_ports
+            .insert(normalized, ports.into_iter().collect());
+        self
+    }
+
+    /// True when `domain` is allowed AND `port` passes its port entry.
+    ///
+    /// A domain with no port entry allows every port; a domain with an entry
+    /// allows only listed ports.
+    #[must_use]
+    pub fn allows_port(&self, domain: &str, port: u16) -> bool {
+        if !self.allows(domain) {
+            return false;
+        }
+        match self.allowed_ports.get(&normalize_domain(domain)) {
+            None => true,
+            Some(ports) => ports.contains(&port),
+        }
+    }
+
+    /// Check `domain` plus `port` against the allowlist.
+    ///
+    /// Same error taxonomy as [`NetworkCapability::check`]: `Ok(())` when
+    /// both pass, [`NetworkError::Offline`] when deny-all, and
+    /// [`NetworkError::Denied`] otherwise (unknown domain or unlisted port).
+    pub fn check_host_port(&self, domain: &str, port: u16) -> Result<(), NetworkError> {
+        if self.allows_port(domain, port) {
+            Ok(())
+        } else if self.is_offline() {
+            Err(NetworkError::Offline)
+        } else {
+            Err(NetworkError::Denied {
+                domain: normalize_domain(domain),
+            })
+        }
+    }
+
+    /// Narrow this grant to exactly the listed HTTP methods (builder style).
+    ///
+    /// Additive across calls: each call unions its methods into the
+    /// restriction. With no restriction every method passes (the legacy
+    /// grant); once any method is listed, only listed methods pass (fail
+    /// closed). Applies to [`Request`] checks via
+    /// [`NetworkCapability::check_request`]; WebSocket handshakes carry no
+    /// method and are unaffected.
+    #[must_use]
+    pub fn restrict_methods(mut self, methods: impl IntoIterator<Item = HttpMethod>) -> Self {
+        self.allowed_methods
+            .get_or_insert_with(HashSet::new)
+            .extend(methods);
+        self
+    }
+
+    /// True when `method` passes the method restriction (every method passes
+    /// while no restriction is recorded).
+    #[must_use]
+    pub fn allows_method(&self, method: HttpMethod) -> bool {
+        self.allowed_methods
+            .as_ref()
+            .map(|methods| methods.contains(&method))
+            .unwrap_or(true)
+    }
+
+    /// Denial for one request-shaped check: [`NetworkError::Offline`] when
+    /// deny-all, else [`NetworkError::Denied`] for `domain`.
+    fn denied(&self, domain: &str) -> NetworkError {
+        if self.is_offline() {
+            NetworkError::Offline
+        } else {
+            NetworkError::Denied {
+                domain: normalize_domain(domain),
+            }
+        }
+    }
+
+    /// Check one HTTP [`Request`]: host, then port, then method.
+    ///
+    /// The port comes from [`Request::port`]; a request with no determinable
+    /// port (no scheme, unknown scheme, unparseable port) is denied fail
+    /// closed. Backends call this before touching any socket.
+    pub fn check_request(&self, request: &Request) -> Result<(), NetworkError> {
+        let host = request.host();
+        self.check(host)?;
+        match request.port() {
+            Some(port) => self.check_host_port(host, port)?,
+            None => return Err(self.denied(host)),
+        }
+        if self.allows_method(request.method) {
+            Ok(())
+        } else {
+            Err(self.denied(host))
+        }
+    }
+
+    /// Check one [`WebSocketRequest`] handshake: host, then port.
+    ///
+    /// Same fail-closed port rule as [`NetworkCapability::check_request`];
+    /// handshakes carry no HTTP method so no method layer applies.
+    pub fn check_handshake(&self, request: &WebSocketRequest) -> Result<(), NetworkError> {
+        let host = request.host();
+        self.check(host)?;
+        match request.port() {
+            Some(port) => self.check_host_port(host, port),
+            None => Err(self.denied(host)),
         }
     }
 }
@@ -257,6 +403,17 @@ impl Request {
     pub fn host(&self) -> &str {
         url_host(&self.url)
     }
+
+    /// Best-effort destination port of [`Request::url`].
+    ///
+    /// Returns the explicit port when the authority carries a parseable one,
+    /// else the scheme default (`443` for `https`/`wss`, `80` for
+    /// `http`/`ws`), else `None`. [`NetworkCapability::check_request`]
+    /// denies portless requests fail closed.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        url_port(&self.url)
+    }
 }
 
 /// HTTP response vocabulary (no I/O).
@@ -334,6 +491,14 @@ impl WebSocketRequest {
     pub fn host(&self) -> &str {
         url_host(&self.url)
     }
+
+    /// Best-effort destination port of [`WebSocketRequest::url`]; see
+    /// [`Request::port`] for the rule. [`NetworkCapability::check_handshake`]
+    /// denies portless handshakes fail closed.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        url_port(&self.url)
+    }
 }
 
 /// Service boundary behind which network implementations live.
@@ -388,6 +553,35 @@ pub trait NetworkService {
 /// Lowercase and trim one trailing dot (`example.com.`); keep matching exact.
 fn normalize_domain(domain: impl AsRef<str>) -> String {
     domain.as_ref().trim().trim_end_matches('.').to_lowercase()
+}
+
+/// Best-effort port extraction over the URL vocabulary (no parsing
+/// dependencies): explicit authority port when parseable, else the scheme
+/// default (`443` for `https`/`wss`, `80` for `http`/`ws`), else `None`.
+/// IPv6 brackets are honored; userinfo is stripped before the split.
+fn url_port(url: &str) -> Option<u16> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    let explicit = if let Some(stripped) = hostport.strip_prefix('[') {
+        match stripped.split_once(']') {
+            Some((_, tail)) => tail.strip_prefix(':'),
+            None => None,
+        }
+    } else {
+        hostport.split_once(':').map(|(_, port)| port)
+    };
+    match explicit {
+        Some(text) => text.parse::<u16>().ok(),
+        None => match scheme.to_lowercase().as_str() {
+            "https" | "wss" => Some(443),
+            "http" | "ws" => Some(80),
+            _ => None,
+        },
+    }
 }
 
 /// Best-effort host extraction over the URL vocabulary (no parsing
@@ -552,5 +746,134 @@ mod tests {
             service.websocket(&WebSocketRequest::new("wss://example.com")),
             Err(NetworkError::Offline)
         );
+    }
+
+    #[test]
+    fn port_extraction_prefers_explicit_then_scheme_default() {
+        assert_eq!(Request::get("https://example.com/path").port(), Some(443));
+        assert_eq!(
+            Request::get("http://example.com:8080/submit").port(),
+            Some(8080)
+        );
+        assert_eq!(
+            WebSocketRequest::new("wss://example.com:9443/socket").port(),
+            Some(9443)
+        );
+        assert_eq!(
+            WebSocketRequest::new("ws://example.com/socket").port(),
+            Some(80)
+        );
+        assert_eq!(Request::get("http://[::1]:8080/").port(), Some(8080));
+        assert_eq!(Request::get("https://user@example.com/a").port(), Some(443));
+        assert_eq!(Request::get("example.com").port(), None);
+        assert_eq!(Request::get("gopher://example.com/").port(), None);
+        assert_eq!(Request::get("https://example.com:notaport/").port(), None);
+        assert_eq!(Request::get("").port(), None);
+    }
+
+    #[test]
+    fn port_grant_is_fail_closed_per_host() {
+        let capped = NetworkCapability::offline().with_domain_ports("example.com", [443]);
+        assert!(capped.allows("example.com"));
+        assert!(capped.allows_port("example.com", 443));
+        assert!(!capped.allows_port("example.com", 80));
+        assert!(!capped.allows_port("other.example", 443));
+        assert_eq!(capped.check_host_port("example.com", 443), Ok(()));
+        assert_eq!(
+            capped.check_host_port("example.com", 80),
+            Err(NetworkError::Denied {
+                domain: "example.com".to_owned()
+            })
+        );
+        assert_eq!(
+            NetworkCapability::offline().check_host_port("example.com", 443),
+            Err(NetworkError::Offline)
+        );
+    }
+
+    #[test]
+    fn empty_port_list_denies_every_port() {
+        let capped = NetworkCapability::offline().with_domain_ports("example.com", []);
+        assert!(capped.allows("example.com"));
+        assert!(!capped.allows_port("example.com", 443));
+    }
+
+    #[test]
+    fn legacy_domain_grant_keeps_every_port() {
+        let capped = NetworkCapability::offline().with_domain("example.com");
+        assert!(capped.allows_port("example.com", 443));
+        assert!(capped.allows_port("example.com", 8080));
+        assert_eq!(
+            capped.check_request(&Request::get("https://example.com/")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn check_request_enforces_host_port_method() {
+        let capped = NetworkCapability::offline()
+            .with_domain_ports("example.com", [443])
+            .restrict_methods([HttpMethod::Get]);
+        assert_eq!(
+            capped.check_request(&Request::get("https://example.com/")),
+            Ok(())
+        );
+        assert_eq!(
+            capped.check_request(&Request::post("https://example.com/", vec![1])),
+            Err(NetworkError::Denied {
+                domain: "example.com".to_owned()
+            })
+        );
+        assert_eq!(
+            capped.check_request(&Request::get("http://example.com:8080/")),
+            Err(NetworkError::Denied {
+                domain: "example.com".to_owned()
+            })
+        );
+        assert_eq!(
+            capped.check_request(&Request::get("https://other.example/")),
+            Err(NetworkError::Denied {
+                domain: "other.example".to_owned()
+            })
+        );
+        assert_eq!(
+            capped.check_request(&Request::get("example.com")),
+            Err(NetworkError::Denied {
+                domain: "example.com".to_owned()
+            })
+        );
+        assert_eq!(
+            NetworkCapability::offline().check_request(&Request::get("https://example.com/")),
+            Err(NetworkError::Offline)
+        );
+    }
+
+    #[test]
+    fn check_handshake_enforces_host_port_without_methods() {
+        let capped = NetworkCapability::offline()
+            .with_domain_ports("example.com", [443])
+            .restrict_methods([HttpMethod::Get]);
+        assert_eq!(
+            capped.check_handshake(&WebSocketRequest::new("wss://example.com/socket")),
+            Ok(())
+        );
+        assert_eq!(
+            capped.check_handshake(&WebSocketRequest::new("ws://example.com:8080/socket")),
+            Err(NetworkError::Denied {
+                domain: "example.com".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn method_restriction_is_additive_and_defaults_open() {
+        let open = NetworkCapability::offline().with_domain("example.com");
+        assert!(open.allows_method(HttpMethod::Post));
+        let capped = open
+            .restrict_methods([HttpMethod::Get])
+            .restrict_methods([HttpMethod::Post]);
+        assert!(capped.allows_method(HttpMethod::Get));
+        assert!(capped.allows_method(HttpMethod::Post));
+        assert!(!capped.allows_method(HttpMethod::Delete));
     }
 }

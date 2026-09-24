@@ -119,13 +119,25 @@ impl OfflineNetworkService {
         &self.capability
     }
 
-    /// Capability-first rejection for `domain`: deny-all and allowlist misses
+    /// Capability-first rejection for `request`: deny-all and allowlist misses
     /// surface the checker's typed error, allowlist hits fail closed with
     /// [`NetworkError::Offline`] (no sockets yet).
     ///
     /// [`NetworkError::Offline`]: bitty_network_api::NetworkError::Offline
-    fn reject(&self, domain: &str) -> NetworkError {
-        match self.capability.check(domain) {
+    fn reject_request(&self, request: &Request) -> NetworkError {
+        match self.capability.check_request(request) {
+            Ok(()) => NetworkError::Offline,
+            Err(error) => error,
+        }
+    }
+
+    /// Capability-first rejection for `request` handshakes: same shape as
+    /// [`OfflineNetworkService::reject_request`] over
+    /// [`NetworkCapability::check_handshake`].
+    ///
+    /// [`NetworkCapability::check_handshake`]: bitty_network_api::NetworkCapability::check_handshake
+    fn reject_handshake(&self, request: &WebSocketRequest) -> NetworkError {
+        match self.capability.check_handshake(request) {
             Ok(()) => NetworkError::Offline,
             Err(error) => error,
         }
@@ -136,10 +148,10 @@ impl NetworkService for OfflineNetworkService {
     type Socket = OfflineSocket;
 
     fn request(&self, request: &Request) -> Result<Response, NetworkError> {
-        Err(self.reject(request.host()))
+        Err(self.reject_request(request))
     }
 
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
-        Err(self.reject(request.host()))
+        Err(self.reject_handshake(request))
     }
 }
