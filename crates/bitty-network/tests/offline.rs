@@ -135,6 +135,18 @@ fn serves_the_network_service_boundary() {
 }
 
 #[test]
+fn proxy_gate_meaning_is_pinned() {
+    // Issue #29 (CTX-0015): the `proxy` gate enables environment-proxy
+    // inheritance and nothing else. This single assertion pins both sides:
+    // the CI feature matrix runs this target once per gate, so the `proxy`
+    // leg asserts `true` and every other leg asserts `false`.
+    assert_eq!(
+        bitty_network::proxy::env_proxy_enabled(),
+        cfg!(feature = "proxy")
+    );
+}
+
+#[test]
 fn feature_gates_resolve_or_fail_closed() {
     // `client` / `http` resolve to the offline backend when enabled.
     #[cfg(feature = "client")]

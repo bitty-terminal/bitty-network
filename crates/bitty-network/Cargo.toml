@@ -37,11 +37,23 @@ tungstenite = { version = "=0.30.0", default-features = false, features = ["hand
 [features]
 default = []
 client = []
+# Accepted fail-closed no-op (CTX-0015, issue #26): client-only by
+# construction, no listen path. Never add code behind this gate without a
+# listen capability verb plus UE and security-corpus review.
 server = []
 http = ["dep:reqwest"]
 # The WebSocket handshake reuses the `http` backend (capability ownership,
 # proxy decision, service type), so the feature implies `http`.
 websocket = ["dep:tungstenite", "http"]
+# Direction marker only, not a contract (CTX-0015, issue #27): enables no
+# transport. A real QUIC backend needs deny.toml approval, an MSRV-1.85
+# pick, and capability-first enforcement before it lands here.
 quic = []
+# Environment-proxy inheritance opt-in (CTX-0015, issue #29): with this
+# gate backends may inherit HTTPS_PROXY/NO_PROXY; without it egress is
+# direct-only unless the caller passes an explicit proxy (always on).
 proxy = []
+# Accepted fail-closed no-op (CTX-0015, issue #28): oauth credential flow
+# is deferred to a joint design with the bitty-ai owners plus a
+# security-corpus review. No token code behind this gate until sign-off.
 oauth = []
