@@ -27,9 +27,12 @@
 //! lowercase `https_proxy`) names the proxy; `NO_PROXY` (or lowercase
 //! `no_proxy`) lists bypassed hosts (exact match, case-insensitive; a
 //! leading-dot entry matches subdomains; `*` bypasses everything). With no
-//! proxy configured the backend sends directly — proxy-off default. An
-//! unparseable proxy URL is ignored (direct egress, still
-//! capability-gated), so operators must use valid URLs. Use
+//! proxy configured the backend sends directly — proxy-off default. A
+//! configured proxy that cannot be parsed or carries userinfo is rejected
+//! before a client is built: [`HttpNetworkService::with_proxy`] returns
+//! [`NetworkError::Offline`], while environment configuration makes the
+//! service fail closed for every request instead of silently switching to
+//! direct egress. Credential-bearing URLs are never retained or logged. Use
 //! [`HttpNetworkService::with_proxy`] to pin an explicit proxy URL instead
 //! (deterministic override for tests and operators).
 //!
@@ -42,8 +45,9 @@
 //! (no body bytes are read when it already exceeds the cap) and then streams
 //! the body through a capped sink, so an over-long body fails closed with
 //! [`NetworkError::Budget`] instead of being buffered or truncated. With no
-//! cap set the body is read whole, as before. WebSocket message budgets are
-//! follow-up scope.
+//! cap set the body is read whole, as before. The WebSocket module enforces
+//! frame, assembled-message, aggregate-byte, frame-count, message-count,
+//! and pending-write-buffer budgets at the transport boundary.
 //!
 //! [`Request::max_body_bytes`]: bitty_network_api::Request::max_body_bytes
 //! [`NetworkError::Budget`]: bitty_network_api::NetworkError::Budget
@@ -120,10 +124,20 @@ const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 /// deny-all with proxy-off; see the [module docs](self) for the request path.
 ///
 /// [`NetworkService`]: bitty_network_api::NetworkService
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpNetworkService {
     capability: NetworkCapability,
     egress: Egress,
+}
+
+impl std::fmt::Debug for HttpNetworkService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpNetworkService")
+            .field("capability", &self.capability)
+            .field("proxy_configured", &self.egress.via_proxy.is_some())
+            .field("proxy_rejected", &self.egress.proxy_rejected)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Egress clients behind one service: direct always, proxied when configured.
@@ -131,33 +145,39 @@ pub struct HttpNetworkService {
 /// The proxy URL and bypass list are snapshotted at construction so the
 /// per-request decision is a pure function of the request host (see
 /// [`select_proxy`]).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Egress {
     direct: reqwest::blocking::Client,
     via_proxy: Option<reqwest::blocking::Client>,
     https_proxy: Option<String>,
     no_proxy: String,
+    proxy_rejected: bool,
 }
 
 impl HttpNetworkService {
     /// Serve HTTP under `capability`, proxy inherited from the environment.
     ///
     /// Reads `HTTPS_PROXY`/`https_proxy` and `NO_PROXY`/`no_proxy` once; an
-    /// absent or unparseable proxy URL means direct egress (proxy-off
-    /// default). Construction performs no I/O.
+    /// absent proxy means direct egress (proxy-off default), while an
+    /// unusable configured proxy makes the service fail closed. Construction
+    /// performs no I/O.
     #[must_use]
     pub fn new(capability: NetworkCapability) -> Self {
-        let https_proxy = https_proxy_from_env();
-        let no_proxy = no_proxy_from_env();
-        let via_proxy = match https_proxy.as_deref() {
-            Some(url) => proxy_client(url),
-            None => None,
-        };
-        // An unparseable environment proxy must not route half-proxied: drop
-        // it so the bypass decision below stays direct-only.
-        let https_proxy = match via_proxy {
-            Some(_) => https_proxy,
-            None => None,
+        Self::from_proxy_config(capability, https_proxy_from_env(), no_proxy_from_env())
+    }
+
+    fn from_proxy_config(
+        capability: NetworkCapability,
+        https_proxy: Option<String>,
+        no_proxy: String,
+    ) -> Self {
+        let (via_proxy, https_proxy, proxy_rejected) = match https_proxy {
+            Some(url) if !proxy_url_has_credentials(&url) => match proxy_client(&url) {
+                Some(client) => (Some(client), Some(url), false),
+                None => (None, None, true),
+            },
+            Some(_) => (None, None, true),
+            None => (None, None, false),
         };
         Self {
             capability,
@@ -166,6 +186,7 @@ impl HttpNetworkService {
                 via_proxy,
                 https_proxy,
                 no_proxy,
+                proxy_rejected,
             },
         }
     }
@@ -175,23 +196,36 @@ impl HttpNetworkService {
     /// Deterministic override for tests and operators: `proxy_url` replaces
     /// whatever the environment says (pass-through when the environment must
     /// win goes through [`HttpNetworkService::new`]). Returns
-    /// [`NetworkError::Offline`] when `proxy_url` does not parse — fail
-    /// closed, never half-proxied.
+    /// [`NetworkError::Offline`] when `proxy_url` does not parse or carries
+    /// userinfo — fail closed, never half-proxied.
     pub fn with_proxy(
         capability: NetworkCapability,
         proxy_url: &str,
     ) -> Result<Self, NetworkError> {
-        match proxy_client(proxy_url) {
-            Some(via_proxy) => Ok(Self {
-                capability,
-                egress: Egress {
-                    direct: Self::client_with(None),
-                    via_proxy: Some(via_proxy),
-                    https_proxy: Some(proxy_url.to_owned()),
-                    no_proxy: String::new(),
-                },
-            }),
-            None => Err(NetworkError::Offline),
+        if proxy_url_has_credentials(proxy_url) {
+            return Err(NetworkError::Offline);
+        }
+        let via_proxy = match proxy_client(proxy_url) {
+            Some(client) => client,
+            None => return Err(NetworkError::Offline),
+        };
+        Ok(Self {
+            capability,
+            egress: Egress {
+                direct: Self::client_with(None),
+                via_proxy: Some(via_proxy),
+                https_proxy: Some(proxy_url.to_owned()),
+                no_proxy: String::new(),
+                proxy_rejected: false,
+            },
+        })
+    }
+
+    fn ensure_proxy_usable(&self) -> Result<(), NetworkError> {
+        if self.egress.proxy_rejected {
+            Err(NetworkError::Offline)
+        } else {
+            Ok(())
         }
     }
 
@@ -413,6 +447,7 @@ impl NetworkService for HttpNetworkService {
 
     fn request(&self, request: &Request) -> Result<Response, NetworkError> {
         self.capability.check_request(request)?;
+        self.ensure_proxy_usable()?;
         self.send(request)
     }
 
@@ -423,6 +458,7 @@ impl NetworkService for HttpNetworkService {
     #[cfg(feature = "websocket")]
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
         self.capability.check_handshake(request)?;
+        self.ensure_proxy_usable()?;
         crate::websocket::connect(request, self.proxy_url_for(request.host()).as_deref())
     }
 
@@ -430,6 +466,15 @@ impl NetworkService for HttpNetworkService {
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
         Err(self.reject(request))
     }
+}
+
+fn proxy_url_has_credentials(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return true;
+    };
+    rest.split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
 }
 
 /// Build one proxied shared client for `url`, or `None` when it does not parse.
@@ -584,6 +629,28 @@ mod tests {
         assert_eq!(
             HttpNetworkService::with_proxy(NetworkCapability::offline(), "://bad-url").err(),
             Some(NetworkError::Offline)
+        );
+    }
+
+    #[test]
+    fn credentialed_proxy_fails_closed_without_debug_secret() {
+        let secret = "fixture-pass";
+        let proxy_url = format!("http://fixture-user:{secret}@proxy.test/");
+        assert_eq!(
+            HttpNetworkService::with_proxy(NetworkCapability::offline(), &proxy_url).err(),
+            Some(NetworkError::Offline)
+        );
+        let service = HttpNetworkService::from_proxy_config(
+            NetworkCapability::offline().with_domain("allowed.test"),
+            Some(proxy_url),
+            String::new(),
+        );
+        let debug = format!("{service:?}");
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("fixture-user"));
+        assert_eq!(
+            service.request(&Request::get("https://allowed.test/")),
+            Err(NetworkError::Offline)
         );
     }
 

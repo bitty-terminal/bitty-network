@@ -28,10 +28,10 @@
 //! background tasks, and takes no network dependencies (its only dependency
 //! is the path-local `bitty-network-api` vocabulary): every allowed request
 //! fails closed with [`NetworkError::Offline`], and capability misses
-//! surface the typed denial. The [`http`] backend (feature-gated,
-//! default-off) is the only module that moves bytes; everything else keeps
-//! the offline promise. Anything that needs the network today must still go
-//! through its existing path unless it opts into the `http` (or
+//! surface the typed denial. The feature-gated [`http`] and [`websocket`]
+//! backends are the modules that move bytes; the remaining marker modules
+//! keep the offline promise. Anything that needs the network today must
+//! still go through its existing path unless it opts into the `http` (or
 //! `websocket`) feature explicitly.
 //!
 //! # Example

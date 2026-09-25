@@ -68,6 +68,8 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use bitty_network_api::{NetworkError, WebSocketRequest};
@@ -165,6 +167,57 @@ const MAX_DNS_ADDRS: usize = 16;
 /// Polling interval used while waiting for a bounded DNS worker.
 const DNS_WAIT_POLL: Duration = Duration::from_millis(1);
 
+const DNS_WORKER_COUNT: usize = 4;
+const DNS_JOB_CAPACITY: usize = 32;
+
+type ResolverResult = std::io::Result<Vec<SocketAddr>>;
+type Resolver = Box<dyn FnOnce() -> ResolverResult + Send + 'static>;
+
+struct ResolverJob {
+    resolver: Resolver,
+    result: mpsc::Sender<ResolverResult>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ResolverJob {
+    fn run(self) {
+        if self.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.result.send((self.resolver)());
+    }
+}
+
+struct ResolverPool {
+    sender: mpsc::SyncSender<ResolverJob>,
+}
+
+impl ResolverPool {
+    fn global() -> &'static Self {
+        static POOL: OnceLock<ResolverPool> = OnceLock::new();
+        POOL.get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel::<ResolverJob>(DNS_JOB_CAPACITY);
+            let receiver = Arc::new(Mutex::new(receiver));
+            for _ in 0..DNS_WORKER_COUNT {
+                let receiver = Arc::clone(&receiver);
+                std::thread::spawn(move || {
+                    loop {
+                        let received = match receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => break,
+                        };
+                        match received {
+                            Ok(job) => job.run(),
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+            Self { sender }
+        })
+    }
+}
+
 /// Maximum bytes retained after a `CONNECT` response terminator.
 const MAX_CONNECT_LEFTOVER: usize = 65_536;
 
@@ -219,11 +272,6 @@ impl DeadlineStream {
         self.write_deadline = Some(deadline);
         self.apply_read_timeout()?;
         self.apply_write_timeout()
-    }
-
-    fn set_read_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
-        self.read_deadline = Some(deadline);
-        self.apply_read_timeout()
     }
 
     fn apply_read_timeout(&mut self) -> std::io::Result<()> {
@@ -342,7 +390,6 @@ trait DeadlineSetter {
     ) -> std::io::Result<()>;
 
     fn set_deadline(&mut self, deadline: Instant) -> std::io::Result<()>;
-    fn set_read_deadline(&mut self, deadline: Instant) -> std::io::Result<()>;
 }
 
 impl DeadlineSetter for DeadlineStream {
@@ -358,10 +405,6 @@ impl DeadlineSetter for DeadlineStream {
     fn set_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
         DeadlineStream::set_deadline(self, deadline)
     }
-
-    fn set_read_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
-        DeadlineStream::set_read_deadline(self, deadline)
-    }
 }
 
 impl<S: DeadlineSetter> DeadlineSetter for BudgetedStream<S> {
@@ -376,10 +419,6 @@ impl<S: DeadlineSetter> DeadlineSetter for BudgetedStream<S> {
 
     fn set_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
         self.inner.set_deadline(deadline)
-    }
-
-    fn set_read_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
-        self.inner.set_read_deadline(deadline)
     }
 }
 
@@ -401,14 +440,6 @@ impl DeadlineSetter for InnerTlsStream {
         match self {
             MaybeTlsStream::Plain(stream) => stream.set_deadline(deadline),
             MaybeTlsStream::Rustls(tls) => tls.get_mut().set_deadline(deadline),
-            _ => Err(std::io::Error::other("unsupported websocket transport")),
-        }
-    }
-
-    fn set_read_deadline(&mut self, deadline: Instant) -> std::io::Result<()> {
-        match self {
-            MaybeTlsStream::Plain(stream) => stream.set_read_deadline(deadline),
-            MaybeTlsStream::Rustls(tls) => tls.get_mut().set_read_deadline(deadline),
             _ => Err(std::io::Error::other("unsupported websocket transport")),
         }
     }
@@ -682,8 +713,9 @@ impl WebSocketSocket {
     /// [`NetworkError::Offline`], and a message crossing
     /// [`MAX_WS_MESSAGE_BYTES`] or pushing the socket past
     /// [`MAX_WS_AGGREGATE_BYTES`] yields [`NetworkError::Budget`]. The
-    /// socket's write deadline is re-applied alongside the new read
-    /// deadline, so later sends and [`WebSocketSocket::close`] stay bounded.
+    /// receive deadline covers both reads and any automatic control-frame
+    /// reply write, so later sends and [`WebSocketSocket::close`] stay
+    /// bounded.
     ///
     /// [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
     /// [`NetworkError::Offline`]: bitty_network_api::NetworkError::Offline
@@ -692,12 +724,27 @@ impl WebSocketSocket {
         let started = Instant::now();
         let deadline = deadline_from(started, timeout);
         self.read_timeout = Some(timeout);
-        self.apply_deadlines()?;
+        let result = self.recv_before_deadline(deadline, timeout);
+        let restore = self.apply_deadlines();
+        match (result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(message), Ok(())) => Ok(message),
+        }
+    }
+
+    fn recv_before_deadline(
+        &mut self,
+        deadline: Instant,
+        timeout: Duration,
+    ) -> Result<WsMessage, NetworkError> {
         loop {
             if Instant::now() >= deadline {
                 return Err(NetworkError::Timeout { after: timeout });
             }
-            set_read_deadline(self.inner.get_mut(), deadline)
+            self.inner
+                .get_mut()
+                .set_deadline(deadline)
                 .map_err(|error| map_io(&error, timeout))?;
             match self.inner.read() {
                 Ok(message) => {
@@ -1043,28 +1090,46 @@ where
     if Instant::now() >= absolute_deadline {
         return Err(NetworkError::Timeout { after: deadline });
     }
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let _worker = std::thread::spawn(move || {
-        let _ = sender.send(resolver());
-    });
+    let (sender, receiver) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let job = ResolverJob {
+        resolver: Box::new(resolver),
+        result: sender,
+        cancelled: Arc::clone(&cancelled),
+    };
+    match ResolverPool::global().sender.try_send(job) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+            return Err(NetworkError::Offline);
+        }
+    }
     loop {
         if Instant::now() >= absolute_deadline {
+            cancelled.store(true, Ordering::Release);
             return Err(NetworkError::Timeout { after: deadline });
         }
         let wait = remaining(deadline, started).min(DNS_WAIT_POLL);
         match receiver.recv_timeout(wait) {
             Ok(Ok(addresses)) => {
-                if addresses.is_empty() || Instant::now() >= absolute_deadline {
-                    if Instant::now() >= absolute_deadline {
-                        return Err(NetworkError::Timeout { after: deadline });
-                    }
+                if Instant::now() >= absolute_deadline {
+                    return Err(NetworkError::Timeout { after: deadline });
+                }
+                if addresses.is_empty() {
                     return Err(NetworkError::Offline);
                 }
                 return Ok(addresses);
             }
-            Ok(Err(_)) => return Err(NetworkError::Offline),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Ok(Err(_)) => {
+                if Instant::now() >= absolute_deadline {
+                    return Err(NetworkError::Timeout { after: deadline });
+                }
+                return Err(NetworkError::Offline);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if Instant::now() >= absolute_deadline {
+                    return Err(NetworkError::Timeout { after: deadline });
+                }
                 return Err(NetworkError::Offline);
             }
         }
@@ -1175,38 +1240,14 @@ fn is_connect_success(head: &str) -> bool {
         None => return false,
     };
     let mut status_parts = status_line.splitn(3, ' ');
-    let version = match status_parts.next() {
+    let _version = match status_parts.next() {
         Some(value)
-            if value
-                .as_bytes()
-                .get(..5)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"HTTP/")) =>
+            if value.eq_ignore_ascii_case("HTTP/1.0") || value.eq_ignore_ascii_case("HTTP/1.1") =>
         {
             value
         }
         _ => return false,
     };
-    let version_tail = match version.as_bytes().get(5..) {
-        Some(value) if !value.is_empty() => value,
-        _ => return false,
-    };
-    let mut version_parts = version_tail.split(|byte| *byte == b'.');
-    let version_ok = match (
-        version_parts.next(),
-        version_parts.next(),
-        version_parts.next(),
-    ) {
-        (Some(major), Some(minor), None) => {
-            !major.is_empty()
-                && !minor.is_empty()
-                && major.iter().all(u8::is_ascii_digit)
-                && minor.iter().all(u8::is_ascii_digit)
-        }
-        _ => false,
-    };
-    if !version_ok {
-        return false;
-    }
     if status_parts.next() != Some("200") {
         return false;
     }
@@ -1214,7 +1255,7 @@ fn is_connect_success(head: &str) -> bool {
         Some(value) if !value.is_empty() => value,
         _ => return false,
     };
-    if reason.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
+    if reason.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
         return false;
     }
     lines.all(|line| {
@@ -1246,13 +1287,9 @@ fn set_deadlines(
     write: Option<Duration>,
 ) -> Result<(), NetworkError> {
     let now = Instant::now();
-    let after = read.or(write).unwrap_or(MIN_REMAINING);
+    let after = write.or(read).unwrap_or(MIN_REMAINING);
     let result = stream.set_deadlines(read, write, now);
     result.map_err(|error| map_io(&error, after))
-}
-
-fn set_read_deadline(stream: &mut WebSocketTransport, deadline: Instant) -> std::io::Result<()> {
-    stream.set_read_deadline(deadline)
 }
 
 /// Map a post-handshake transport failure to its typed error: expired
@@ -1478,6 +1515,48 @@ mod tests {
     /// suite fast, long enough to stay clear of loopback jitter.
     const STALL_DEADLINE: Duration = Duration::from_millis(200);
 
+    #[test]
+    fn resolver_wait_does_not_create_unbounded_threads() {
+        let calls = DNS_WORKER_COUNT * 4;
+        let barrier = Arc::new(std::sync::Barrier::new(calls));
+        let release = Arc::new(AtomicBool::new(false));
+        let (thread_tx, thread_rx) = mpsc::channel();
+        let mut callers = Vec::with_capacity(calls);
+        for _ in 0..calls {
+            let barrier = Arc::clone(&barrier);
+            let release = Arc::clone(&release);
+            let thread_tx = thread_tx.clone();
+            callers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let result = resolve_with_deadline(SILENT_READ, Instant::now(), move || {
+                    let _ = thread_tx.send(std::thread::current().id());
+                    while !release.load(Ordering::Acquire) {
+                        std::thread::sleep(TRICKLE_INTERVAL);
+                    }
+                    Ok(Vec::new())
+                });
+                assert_eq!(result, Err(NetworkError::Timeout { after: SILENT_READ }));
+            }));
+        }
+        drop(thread_tx);
+        for caller in callers {
+            let _ = caller.join();
+        }
+        let mut workers = Vec::new();
+        while workers.len() < calls {
+            match thread_rx.recv_timeout(OPERATION_DEADLINE_BOUND) {
+                Ok(thread_id) => {
+                    if !workers.contains(&thread_id) {
+                        workers.push(thread_id);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        release.store(true, Ordering::Release);
+        assert!(workers.len() <= DNS_WORKER_COUNT);
+    }
+
     /// Read deadline for silent-peer fixtures.
     const SILENT_READ: Duration = Duration::from_millis(100);
 
@@ -1642,6 +1721,43 @@ mod tests {
         port
     }
 
+    fn spawn_draining_raw_server(frames: Vec<(bool, u8, Vec<u8>)>) -> FixtureProcess {
+        let (listener, port) = bind_loopback();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("loopback accept");
+            let mut reader = stream.try_clone().expect("raw reader clone");
+            let server = tungstenite::accept(stream).expect("server handshake");
+            let mut raw = server.into_inner();
+            let drain = std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+            for (fin, opcode, payload) in frames {
+                let frame = encode_server_frame(fin, opcode, &payload);
+                if raw.write_all(&frame).is_err() {
+                    break;
+                }
+            }
+            while !thread_stop.load(Ordering::SeqCst) {
+                std::thread::sleep(TRICKLE_INTERVAL);
+            }
+            let _ = raw.shutdown(std::net::Shutdown::Both);
+            let _ = drain.join();
+        });
+        FixtureProcess {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
     fn closed_port() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed-port bind");
         let port = listener.local_addr().expect("closed-port addr").port();
@@ -1727,6 +1843,54 @@ mod tests {
                                 break;
                             }
                             std::thread::sleep(interval);
+                        }
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(TRICKLE_INTERVAL);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        FixtureProcess {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn spawn_stall_ping_server(signal: Arc<AtomicBool>) -> FixtureProcess {
+        let (listener, port) = bind_loopback();
+        listener
+            .set_nonblocking(true)
+            .expect("stall ping listener nonblocking");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_signal = Arc::clone(&signal);
+        let handle = std::thread::spawn(move || {
+            loop {
+                if thread_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("stall ping stream blocking");
+                        let server = tungstenite::accept(stream).expect("stall ping handshake");
+                        let mut raw = server.into_inner();
+                        while !thread_signal.load(Ordering::Acquire)
+                            && !thread_stop.load(Ordering::SeqCst)
+                        {
+                            std::thread::sleep(TRICKLE_INTERVAL);
+                        }
+                        if !thread_stop.load(Ordering::SeqCst) {
+                            let ping = encode_server_frame(true, OPCODE_PING, b"p");
+                            let _ = raw.write_all(&ping);
+                        }
+                        while !thread_stop.load(Ordering::SeqCst) {
+                            std::thread::sleep(TRICKLE_INTERVAL);
                         }
                         break;
                     }
@@ -2068,6 +2232,19 @@ mod tests {
     }
 
     #[test]
+    fn recv_accepts_single_frame_below_frame_budget() {
+        let payload = vec![0xABu8; MAX_WS_FRAME_BYTES - 1];
+        let port = spawn_raw_server(vec![(true, OPCODE_BINARY, payload.clone())]);
+        let mut socket = connect_loopback(port);
+        assert_eq!(
+            socket
+                .recv_with_timeout(Duration::from_secs(10))
+                .expect("below-boundary frame"),
+            WsMessage::Binary(payload)
+        );
+    }
+
+    #[test]
     fn recv_rejects_single_frame_over_frame_budget() {
         let payload = vec![0xABu8; MAX_WS_FRAME_BYTES + 1];
         let port = spawn_raw_server(vec![(true, OPCODE_BINARY, payload)]);
@@ -2137,6 +2314,11 @@ mod tests {
     }
 
     #[test]
+    fn recv_binary_fragmented_message_boundaries_are_pinned() {
+        assert_message_boundary(OPCODE_BINARY, 0xA5, true);
+    }
+
+    #[test]
     fn recv_rejects_lifetime_aggregate_over_budget() {
         // Sixteen frame-size messages total exactly the aggregate cap; the
         // seventeenth crossing fails. One-mebibyte messages stay single
@@ -2193,6 +2375,35 @@ mod tests {
     }
 
     #[test]
+    fn recv_deadline_covers_stalled_control_reply() {
+        let signal = Arc::new(AtomicBool::new(false));
+        let mut server = spawn_stall_ping_server(Arc::clone(&signal));
+        let mut socket = connect_loopback(server.port);
+        socket.write_timeout = STALL_DEADLINE;
+        let chunk = WsMessage::Binary(vec![0xC3u8; MAX_WS_MESSAGE_BYTES]);
+        let mut write_blocked = false;
+        for _ in 0..4 {
+            match socket.send(chunk.clone()) {
+                Ok(()) => {}
+                Err(NetworkError::Timeout { .. }) => {
+                    write_blocked = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected stalled-write error: {error:?}"),
+            }
+        }
+        assert!(write_blocked, "test did not fill the write path");
+        signal.store(true, Ordering::Release);
+        let started = Instant::now();
+        assert_eq!(
+            socket.recv_with_timeout(SILENT_READ),
+            Err(NetworkError::Timeout { after: SILENT_READ })
+        );
+        assert!(started.elapsed() < OPERATION_DEADLINE_BOUND);
+        server.stop_and_join();
+    }
+
+    #[test]
     fn recv_rejects_frame_flood_including_empty_fragments() {
         let mut frames = Vec::with_capacity(MAX_WS_FRAMES as usize + 1);
         frames.push((false, OPCODE_TEXT, Vec::new()));
@@ -2235,6 +2446,60 @@ mod tests {
                 limit_items: MAX_WS_MESSAGES,
             })
         );
+    }
+
+    #[test]
+    fn recv_accepts_frame_count_minus_one() {
+        let mut frames = Vec::with_capacity(MAX_WS_FRAMES as usize - 1);
+        frames.push((false, OPCODE_TEXT, Vec::new()));
+        frames.extend(std::iter::repeat_n(
+            (false, OPCODE_CONTINUE, Vec::new()),
+            MAX_WS_FRAMES as usize - 2,
+        ));
+        frames.push((true, OPCODE_CONTINUE, Vec::new()));
+        let port = spawn_raw_server(frames);
+        let mut socket = connect_loopback(port);
+        assert_eq!(
+            socket
+                .recv_with_timeout(Duration::from_secs(10))
+                .expect("frame-count boundary"),
+            WsMessage::Text(String::new())
+        );
+    }
+
+    #[test]
+    fn recv_accepts_message_count_minus_one() {
+        let frames = std::iter::repeat_n(
+            (true, OPCODE_TEXT, Vec::new()),
+            MAX_WS_MESSAGES as usize - 1,
+        )
+        .collect();
+        let port = spawn_raw_server(frames);
+        let mut socket = connect_loopback(port);
+        for _ in 0..(MAX_WS_MESSAGES as usize - 1) {
+            assert_eq!(
+                socket
+                    .recv_with_timeout(Duration::from_secs(10))
+                    .expect("message-count boundary"),
+                WsMessage::Text(String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn recv_rejects_control_frame_flood() {
+        let frames =
+            std::iter::repeat_n((true, OPCODE_PING, vec![b'p']), MAX_WS_FRAMES as usize + 1)
+                .collect();
+        let mut server = spawn_draining_raw_server(frames);
+        let mut socket = connect_loopback(server.port);
+        assert_eq!(
+            socket.recv_with_timeout(Duration::from_secs(10)),
+            Err(NetworkError::CountBudget {
+                limit_items: MAX_WS_FRAMES,
+            })
+        );
+        server.stop_and_join();
     }
 
     #[test]
@@ -2352,6 +2617,9 @@ mod tests {
         ));
         assert!(!is_connect_success("HTTP/1.1 200\r\n\r\n"));
         assert!(!is_connect_success("HTTP/... 200 bad\r\n\r\n"));
+        assert!(!is_connect_success("HTTP/1.1 200 ok\0bad\r\n\r\n"));
+        assert!(!is_connect_success("HTTP/1.1 200 ok\x7f\r\n\r\n"));
+        assert!(!is_connect_success("HTTP/999.999 200 ok\r\n\r\n"));
     }
 
     #[test]
