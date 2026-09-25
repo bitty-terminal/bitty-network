@@ -269,17 +269,21 @@ pub enum NetworkError {
     },
     /// The capability is deny-all (offline); no domain is reachable.
     Offline,
-    /// An allowed operation exceeded its deadline; reserved for the socket
-    /// follow-up that produces it.
+    /// An allowed operation exceeded its deadline.
     Timeout {
         /// Deadline that expired.
         after: Duration,
     },
-    /// An allowed operation would exceed its transfer budget; produced by
-    /// backends enforcing [`Request::max_body_bytes`].
+    /// An allowed operation would exceed a byte transfer budget enforced by
+    /// an HTTP response or WebSocket transport.
     Budget {
-        /// Budget that would be exceeded, in bytes.
+        /// Byte budget that would be exceeded.
         limit_bytes: u64,
+    },
+    /// An allowed operation would exceed a frame or message count budget.
+    CountBudget {
+        /// Item-count budget that would be exceeded.
+        limit_items: u64,
     },
 }
 
@@ -293,6 +297,9 @@ impl fmt::Display for NetworkError {
             }
             Self::Budget { limit_bytes } => {
                 write!(f, "network budget exceeded: {limit_bytes} bytes")
+            }
+            Self::CountBudget { limit_items } => {
+                write!(f, "network count budget exceeded: {limit_items} items")
             }
         }
     }
@@ -340,7 +347,9 @@ pub struct Request {
     ///
     /// Enforced fail-closed by backends that move bytes: a response larger
     /// than the cap yields [`NetworkError::Budget`] instead of a truncated
-    /// body. `None` (the default) means no cap.
+    /// body. `None` (the default) means the caller sets no explicit cap, so
+    /// the backend's mandatory ceiling applies; a `Some` value may narrow
+    /// that ceiling but never widens it.
     pub max_body_bytes: Option<u64>,
 }
 
@@ -387,7 +396,8 @@ impl Request {
 
     /// Set the response body cap in bytes (builder style).
     ///
-    /// See [`Request::max_body_bytes`]; `None` is the default (no cap).
+    /// See [`Request::max_body_bytes`]; `None` is the default (no explicit
+    /// caller cap, so the backend ceiling applies).
     #[must_use]
     pub fn with_max_body_bytes(mut self, limit_bytes: u64) -> Self {
         self.max_body_bytes = Some(limit_bytes);
@@ -652,6 +662,10 @@ mod tests {
         assert_eq!(
             NetworkError::Budget { limit_bytes: 8 }.to_string(),
             "network budget exceeded: 8 bytes".to_owned()
+        );
+        assert_eq!(
+            NetworkError::CountBudget { limit_items: 3 }.to_string(),
+            "network count budget exceeded: 3 items".to_owned()
         );
     }
 

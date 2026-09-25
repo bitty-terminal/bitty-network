@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport with supply-chain approval recorded in `deny.toml`.
 - Capability-gated WebSocket backend over `tungstenite` behind the
   default-off `websocket` feature.
+- Hardened WebSocket transport and plain-HTTP proxy tunneling for issue #38:
+  operation-wide DNS/TCP/CONNECT/handshake/receive/send/close deadlines,
+  frame/message/aggregate byte and count budgets, bounded pending writes,
+  fail-closed CONNECT parsing with tunnel-byte preservation, and explicit
+  rejection of authenticated proxy URLs until credential policy lands.
 - Opt-in response transfer budget in the HTTP backend: over-budget responses
   fail closed with the previously reserved `NetworkError::Budget`.
 - Fail-closed egress port and method-verb checks in the capability gate
@@ -40,6 +45,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- CTX-0028 closes the third-round WebSocket deadline and proxy-safety gaps:
+  receive operations install one temporary read/write deadline for automatic
+  control replies, DNS uses bounded elastic permits so caller deadlines return
+  while timed-out OS lookups release permits when the OS returns (exhaustion
+  surfaces `NetworkError::Timeout`), and every reqwest client disables ambient
+  system-proxy discovery. Standard proxy environment variables are checked
+  explicitly; credentialed values are rejected before a reqwest client or
+  retained proxy state is built and never reach service errors, process output,
+  or `Debug`.
+- CTX-0029 pins scheme-specific proxy precedence over `ALL_PROXY` and counts
+  each fragmented WebSocket message at its first data frame. Child-process
+  waits remain bounded, secret scanning precedes success assertions, and DNS
+  saturation reports a typed timeout at the full permit capacity.
+- CTX-0041 makes the documented redirect deadline real: a followed hop chain
+  now shares one effective per-request deadline instead of resetting the
+  timeout per hop, so slow hops cannot multiply the caller's budget. A
+  source-level regression test pins `.no_proxy()` on every reqwest client
+  (inert while the pinned reqwest omits `system-proxy`), and
+  `Request::max_body_bytes` no longer documents `None` as "no cap".
 - Capability-first enforcement is the trust boundary: no ambient network
   access exists anywhere in the crate graph; the default `bitty` binary stays
   network-free and this runtime enters only when a network-capable consumer
