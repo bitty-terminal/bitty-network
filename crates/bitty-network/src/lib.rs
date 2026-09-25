@@ -10,9 +10,12 @@
 //! [`http`] serves it with a shared-client HTTP backend (capability-first,
 //! proxy from the environment, per-request timeouts) and, with `websocket`,
 //! with a capability-gated handshake returning an open socket. The
-//! remaining modules hold marker types so follow-up tasks have a stable
-//! place to land transports, TLS, DNS, and runtime ownership without
-//! reshaping the tree.
+//! remaining modules hold the offline-first shell vocabulary plus the
+//! connection-hardening helpers: [`transport`] (bounded `CONNECT` splits),
+//! [`protocol`] (bounded subprotocol negotiation), [`dns`] (explicit
+//! resolver deadlines and cancellation), [`diagnostics`] (redacted log and
+//! error snapshots), and the [`runtime`], [`tls`], and [`policy`] markers
+//! follow-up tasks will fill.
 //!
 //! The stable vocabulary (`Request`, `WebSocketRequest`, `NetworkCapability`,
 //! `NetworkError`, [`NetworkService`] itself) lives in `bitty-network-api`
@@ -49,6 +52,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod diagnostics;
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
