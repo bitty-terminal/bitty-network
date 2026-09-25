@@ -58,11 +58,24 @@ const API_SOURCE: &str = include_str!("../../bitty-network-api/src/lib.rs");
 /// checked against (the `tls.rs` docs mention certificates and crypto in
 /// order to say the module has neither), so the scan must not see them.
 ///
-/// Line-based: `//!`, `///`, `//`, and `/* */` are removed and the remaining
+/// Line-based and whole-line only: a line whose first non-whitespace characters
+/// open a comment is emptied, `/* */` carries across lines, and the remaining
 /// code keeps its original line numbering so a failure names the right line.
-/// Over-stripping inside a string literal is harmless for the absence checks
-/// (it can only remove text) and none of the presence checks below runs over
-/// a file that carries a comment-looking string literal.
+/// Because it is whole-line only, it has one limit in each direction, and both
+/// are stated here rather than assumed:
+///
+/// - **Over-stripping** can only remove text, so it can turn a `require` into a
+///   failure and a `forbid` into a silent pass. It needs a line that opens with
+///   a string or char literal whose contents begin `//` or `/*`. No line in any
+///   of the four sources scanned below is shaped like that.
+/// - **Under-stripping** keeps a `//` comment that trails code on its line.
+///   Nothing is hidden by that, but something can be faked: a trailing comment
+///   quoting a needle verbatim, or carrying a `#[derive(`, would satisfy a
+///   check reading it. Every needle checked in stripped source below is a
+///   code-shaped token, and no line in any of those four sources carries a
+///   trailing comment, so no pin here is reading prose today. A source that
+///   grows one must have this helper taught about it before the pin it feeds
+///   can be trusted.
 fn code_only(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut in_block_comment = false;
@@ -110,16 +123,57 @@ fn lock_package<'a>(lock: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// The body of a Rust function, from `header` to the line closing its brace.
-fn function_body<'a>(source: &'a str, header: &str) -> &'a str {
-    let start = source.find(header).unwrap_or_else(|| {
+/// The declaration of one item: its leading attribute run plus its body, from
+/// the attribute directly above `header` to the line closing its brace.
+///
+/// Comments are stripped first, so prose inside the window can never satisfy a
+/// `require`. All three properties pinned through this helper — the declared
+/// failure categories, their per-category `Display` arms, and the absence of
+/// `env_proxy_enabled` in `HttpNetworkService::new` — are claims about code, and
+/// a doc comment naming a variant or a function would otherwise pass for one.
+///
+/// The window opens at the *attribute run*, not at the `header` token, because
+/// the properties that only an attribute can violate sit above the item they
+/// apply to. `#[non_exhaustive]` on the failure taxonomy is the load-bearing
+/// one: a window starting at `pub enum NetworkError` could not see it, which
+/// would leave that assertion permanently green and therefore worthless.
+fn function_body(source: &str, header: &str) -> String {
+    let stripped = code_only(source);
+    let header_at = stripped.find(header).unwrap_or_else(|| {
         panic!("`{header}` is absent, so the pinned property cannot be checked");
     });
-    let rest = &source[start..];
-    let end = rest
+    let declaration = &stripped[attribute_run_start(&stripped, header_at)..];
+    let end = declaration
         .find("\n}")
         .unwrap_or_else(|| panic!("`{header}` has no closing brace"));
-    &rest[..end]
+    declaration[..end].to_owned()
+}
+
+/// Byte offset where the contiguous run of `#[..]` attribute lines directly
+/// above `offset` begins.
+///
+/// Only attribute lines are absorbed, and the run ends at the first line above
+/// the item that is not one — a doc comment has already been emptied by
+/// [`code_only`], so it ends the run. A wrapped attribute (`#[cfg_attr(` on one
+/// line, `)]` on another) is not part of the run; no property pinned through
+/// [`function_body`] depends on one.
+fn attribute_run_start(source: &str, offset: usize) -> usize {
+    let mut run_start = offset;
+    let mut below = offset;
+    // `below` starts inside the header's own line, so the first `rfind` lands
+    // on the newline that closes the line above it.
+    while let Some(newline) = source[..below].rfind('\n') {
+        let start = match source[..newline].rfind('\n') {
+            Some(index) => index + 1,
+            None => 0,
+        };
+        if !source[start..newline].trim_start().starts_with("#[") {
+            break;
+        }
+        run_start = start;
+        below = start;
+    }
+    run_start
 }
 
 /// Every macro named by a `#[derive(..)]` attribute, with its source line.
@@ -127,21 +181,39 @@ fn function_body<'a>(source: &'a str, header: &str) -> &'a str {
 /// A `derive(Serialize)` substring test is not enough: the usual shape is
 /// `#[derive(Clone, Serialize, Deserialize)]`, where the bare substring
 /// never appears. Splitting the list is what makes the check able to fail.
+///
+/// The list is read as one span from `#[derive(` to its closing paren rather
+/// than one line at a time, because rustfmt wraps a long list and a wrapped
+/// list is the same declaration:
+///
+/// ```text
+/// #[derive(
+///     Debug,
+///     Serialize,
+/// )]
+/// ```
+///
+/// Scanning line by line would skip a wrapped list whole, which is the one way
+/// this check could miss a forbidden trait.
 fn derived_traits(source: &str) -> Vec<(usize, String)> {
+    const OPEN: &str = "#[derive(";
+    let stripped = code_only(source);
     let mut derived = Vec::new();
-    for (index, line) in code_only(source).lines().enumerate() {
-        let Some(rest) = line.find("#[derive(").map(|start| &line[start + 9..]) else {
-            continue;
+    let mut cursor = 0;
+    while let Some(offset) = stripped[cursor..].find(OPEN) {
+        let start = cursor + offset + OPEN.len();
+        let Some(span) = stripped[start..].find(')') else {
+            break;
         };
-        let Some(end) = rest.find(')') else {
-            continue;
-        };
-        for item in rest[..end].split(',') {
+        let end = start + span;
+        let line = stripped[..start].matches('\n').count() + 1;
+        for item in stripped[start..end].split(',') {
             let item = item.trim();
             if !item.is_empty() {
-                derived.push((index + 1, item.to_owned()));
+                derived.push((line, item.to_owned()));
             }
         }
+        cursor = end;
     }
     derived
 }
@@ -424,7 +496,7 @@ fn failures_are_typed_with_stable_exhaustive_categories() {
     let declaration = function_body(API_SOURCE, "pub enum NetworkError");
     for variant in variants {
         require(
-            declaration,
+            &declaration,
             variant,
             "every typed failure category stays declared",
         );
@@ -432,21 +504,22 @@ fn failures_are_typed_with_stable_exhaustive_categories() {
     let display = function_body(API_SOURCE, "impl fmt::Display for NetworkError");
     for variant in variants {
         require(
-            display,
+            &display,
             &format!("Self::{variant}"),
             "every category has its own stable display string",
         );
     }
     forbid(
-        display,
+        &display,
         "_ =>",
         "the display implementation has no catch-all arm, so a new category cannot \
          hide behind a generic message",
     );
     forbid(
-        declaration,
-        "#[non_exhaustive]",
-        "the failure taxonomy is not open-ended for downstream consumers",
+        &declaration,
+        "non_exhaustive",
+        "the failure taxonomy is not open-ended for downstream consumers: no attribute \
+         on it, in any spelling, marks it `non_exhaustive`",
     );
 }
 
@@ -501,7 +574,7 @@ fn proxy_gate_is_a_predicate_without_construction_wiring() {
         "the gate is decided by the feature alone",
     );
     forbid(
-        function_body(HTTP_SOURCE, "pub fn new(capability: NetworkCapability)"),
+        &function_body(HTTP_SOURCE, "pub fn new(capability: NetworkCapability)"),
         "env_proxy_enabled",
         "at this base `new` does not consult the gate predicate; when the call-site \
          wiring lands this assertion fails and the record must be re-verified",

@@ -7,15 +7,37 @@ Base pin: ref `integrate/lanes-abc` at commit `941c235` ([CTX-0041]), the
 parent of the commit that adds this file. Every current-state statement in this
 record is scoped to that ref-plus-commit pair and describes `941c235`, not
 `origin/main` (`de77e17`), which does not contain it; readers must not carry
-these statements onto `origin/main` without re-verifying them. The source tree
-on this branch is identical to that base: the branch adds only this record and
-the test file named below.
+these statements onto `origin/main` without re-verifying them.
 
-**Scoping rule.** Current-state claims hold at the pinned base and nowhere
-else. When the base moves, they must be re-verified before being relied on
-again. Nothing in this record keeps them true automatically; the property pins
-below exist so that a moved base fails the build instead of quietly
-invalidating a document.
+The base pin is a scope declaration, not a checked invariant. The pin suite
+named below is evaluated against this branch's working tree, so it reports what
+this branch's sources do and says nothing about which commit they came from.
+This branch currently adds only this record and the test file to that base, so
+the working tree and the base agree; that agreement is maintained by a human
+merging forward and re-reading, and the suite does not verify it.
+
+**Scoping rule.** Current-state claims hold at the base named above and
+nowhere else, and nothing here keeps them true automatically. In particular the
+suite does not pin the base: it reads the working tree through `include_str!`,
+so it never observes `941c235`, and moving the base ref on its own — without
+merging it into this branch — leaves every pin green and invisible to it. What
+the pins enforce is the narrower property the sentences below actually rest on,
+and the two cases that produces are:
+
+- A base move that is merged here and **changes** a pinned property turns the
+  suite red. The property assertion no longer holds, and its message names the
+  record sentence to re-read.
+- A base move that is merged here and **leaves every pinned property intact**
+  keeps the suite green. That is deliberate rather than a gap: the pins are
+  properties, not provenance, so a merge that preserves them is not a
+  regression. It is also the limit of the guarantee — a current-state sentence
+  can stop being true without any pin noticing — so re-verification after a
+  base move stays a human obligation that no assertion discharges.
+
+A pin on the base commit itself is deliberately absent. "The base is
+`941c235`" would restate the paragraph above instead of checking anything and
+would be deleted on sight at the next merge, which is why no assertion in
+`crates/bitty-network/tests/tls_baseline_properties.rs` names a commit.
 
 Parent: #14 (unified TLS provider slice; custom CA and client identity).
 
@@ -200,9 +222,12 @@ claim with no pin behind it is unverified and must be re-established before it
 is relied on. The pins are deliberately properties of behavior, manifests, and
 the resolved dependency graph, not of commit identity: they keep holding when
 the graph is rebased or merged, and they fail the moment a change breaks the
-property a sentence depends on. A change that legitimately moves a base
-statement is expected to break a pin on purpose, so the record is re-read
-instead of drifting.
+property a sentence depends on. A change that alters a pinned property is
+therefore expected to break a pin on purpose, so the record is re-read instead
+of drifting. The converse is equally true and is stated here so the two are not
+confused: a change that moves a current-state sentence without altering any
+pinned property breaks nothing, and the scoping rule above — not the suite — is
+what covers that case.
 
 The transport-level egress control this record leans on — every reqwest client
 builder disabling ambient system-proxy discovery and redirect following, and no
