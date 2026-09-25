@@ -39,13 +39,21 @@ All default-off. `http` carries the reqwest tree (`=0.13.5`, exact pin in
 tree (`=0.30.0`, same pinning) and implies `http`:
 
 - `client`, `server` — initiator/listener roles (`client` resolves to the
-  offline backend; `server` stays fail-closed).
+  offline backend; `server` stays fail-closed: client-only by construction,
+  no listen path — see `../../docs/decisions/26-server.md`).
 - `http`, `websocket` — protocol wire code (`http` enables the real
   `HttpNetworkService` and keeps the offline resolution alongside it;
   `websocket` enables the capability-gated handshake on that same backend,
   returning an open `WebSocketSocket`).
-- `quic` — QUIC transport (fail-closed).
-- `proxy`, `oauth` — egress policy and credential flows (fail-closed).
+- `quic` — direction marker only, not a transport contract (fail-closed;
+  see `../../docs/decisions/27-quic.md`).
+- `proxy` — environment-proxy inheritance opt-in (explicit proxies stay
+  always-on; see `../../docs/decisions/29-proxy.md` and `src/proxy.rs`).
+- `oauth` — deferred credential flow, jointly owned with bitty-ai
+  (fail-closed; see `../../docs/decisions/28-oauth.md`).
+- Bridge to an external `bitty-networkd` (BN-6): move criteria and bridge
+  shape are defined in `../../docs/decisions/30-bridge.md`; embedded stays the
+  only backend.
 
 ## Boundaries
 

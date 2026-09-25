@@ -55,6 +55,7 @@ pub mod http;
 pub mod offline;
 pub mod policy;
 pub mod protocol;
+pub mod proxy;
 pub mod runtime;
 pub mod tls;
 pub mod transport;

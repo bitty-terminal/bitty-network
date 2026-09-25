@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fail-closed egress port and method-verb checks in the capability gate
   (`bitty-network#13`): manifest-declared ports and verbs are enforced, not
   just hosts.
+- Direction decisions for the five no-code gates (CTX-0015): client-only by
+  construction with `server` fail-closed (`#26`), `quic` as a
+  direction-not-contract marker (`#27`), the `proxy` gate meaning
+  environment-proxy inheritance with explicit proxies always-on (`#29`),
+  BN-6 bridge move criteria and shape with embedded as the only backend
+  (`#30`), and oauth deferral with the bitty-ai owners (`#28`).
 
 ### Changed
 
