@@ -11,9 +11,11 @@
 //! followed with headers intact, cross-origin hops stripped of sensitive
 //! headers, denied second hops never sent, redirect loops stopped at the hop
 //! limit, and a hop chain bounded by the caller's single deadline. The egress
-//! controls on every reqwest client are pinned by a source-level assertion,
-//! because the ambient system-proxy control they carry is inert under the
-//! pinned reqwest feature set.
+//! controls on every reqwest client are pinned by `pac_decision_pins.rs`,
+//! which owns that property crate-wide and in every CI leg; this file no
+//! longer carries a second scanner for it, because the pinned reqwest build
+//! omits its `system-proxy` feature, so the control is inert at runtime and
+//! needs a source-level pin exactly once.
 //!
 //! [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
 
@@ -916,44 +918,4 @@ fn redirect_chain_shares_one_request_deadline() {
     );
 
     probe.stop_and_join();
-}
-
-/// Every reqwest client in the crate carries the egress controls.
-///
-/// The pinned reqwest build omits its `system-proxy` feature, so
-/// `.no_proxy()` has no observable runtime effect here and no behavioural
-/// test can fail when it is dropped. This source-level assertion pins the
-/// control instead: `http.rs` is the only module that builds clients, and
-/// every `Client::builder()` chain in it must disable ambient proxy
-/// discovery and redirect following, with no unconfigured client
-/// constructor to bypass them.
-#[test]
-fn every_client_builder_disables_ambient_proxy_and_redirects() {
-    let source = include_str!("../src/http.rs");
-    let mut rest = source;
-    let mut builders = 0;
-    while let Some(start) = rest.find("Client::builder()") {
-        builders += 1;
-        let chain = &rest[start..];
-        let end = chain
-            .find(".build()")
-            .expect("every client builder chain ends in .build()");
-        let calls = &chain[..end];
-        assert!(
-            calls.contains(".no_proxy()"),
-            "client builder {builders} omits .no_proxy()"
-        );
-        assert!(
-            calls.contains("Policy::none()"),
-            "client builder {builders} omits Policy::none()"
-        );
-        rest = &chain[end..];
-    }
-    assert!(builders > 0, "no client builder chain found in http.rs");
-    for constructor in ["Client::new()", "Client::default()", "ClientBuilder::new()"] {
-        assert!(
-            !source.contains(constructor),
-            "unconfigured client construction {constructor} bypasses the egress controls"
-        );
-    }
 }

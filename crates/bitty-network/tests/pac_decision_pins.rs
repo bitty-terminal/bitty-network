@@ -13,22 +13,31 @@
 //! - These tests pin **requirements**, not history. A control that does not
 //!   exist yet fails here, which is the point: the record's controls are
 //!   unmerged work and a silently dropped control is a security defect.
-//! - The pins are deliberately **not** behind `#![cfg(feature = "http")]`,
-//!   even though most of them read `src/http.rs`. The `http` feature is
-//!   default-off, and a pin that only runs in one CI leg is a pin that can
-//!   quietly stop running. `include_str!` reads the file as text, so the
-//!   property is checkable in every leg.
-//! - `tests/http.rs` already pins the same two egress controls
-//!   (`every_client_builder_disables_ambient_proxy_and_redirects`) and
-//!   already exercises the ambient rejection end to end
+//! - Seven of the eight pins are deliberately **not** behind
+//!   `#![cfg(feature = "http")]`, even though most of them read `src/http.rs`.
+//!   The `http` feature is default-off, and a pin that only runs in one CI leg
+//!   is a pin that can quietly stop running. The scan reads the file as text
+//!   through `CARGO_MANIFEST_DIR`, and `src/http.rs` is on disk whatever the
+//!   feature gate says, so the property is checkable in every leg. The eighth,
+//!   `credential_bearing_explicit_proxy_fails_closed_without_dialing`, cannot
+//!   follow: it constructs `HttpNetworkService`, whose re-export in
+//!   `src/lib.rs` is itself behind the same feature. It runs in two legs of
+//!   three, and the record says so rather than claiming otherwise.
+//! - `tests/http.rs` still exercises the ambient rejection end to end
 //!   (`ambient_proxy_environment_is_explicit_and_credential_safe`, which
 //!   spawns a child process because mutating the environment is `unsafe` in
-//!   edition 2024). Those pins are **referenced, not duplicated**: what is
-//!   added here is the crate-wide scope, the `unwrap_or_else` fallback ban,
-//!   the single-injection-point rule, and the *ordering* of the credential
-//!   check against proxy injection — which no behavioural test can
-//!   distinguish, because "validated before injecting" and "validated, and
-//!   injected anyway" produce the same observable outcome.
+//!   edition 2024). That pin is **referenced, not duplicated**. It used to be
+//!   joined by a second, narrower source scanner for the same egress controls
+//!   (`every_client_builder_disables_ambient_proxy_and_redirects`, scoped to
+//!   `src/http.rs` and behind the `http` feature); that one is deleted, because
+//!   `every_client_construction_site_disables_ambient_discovery` below is a
+//!   strict superset of it and two scanners for one property drift apart.
+//!   What this file adds that no `http.rs` test can reach is the
+//!   `unwrap_or_else` fallback ban, the single-injection-point rule, and the
+//!   *ordering* of the credential check against proxy injection — which no
+//!   behavioural test can distinguish, because "validated before injecting"
+//!   and "validated, and injected anyway" produce the same observable
+//!   outcome.
 //! - Source-level pins read text, so they constrain shape, not types. A
 //!   refactor that moves a call between functions will fail them; that is a
 //!   false positive to fix in the test, not a security hole, and the failure
@@ -130,6 +139,44 @@ fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     &source[start..=end]
 }
 
+/// Signature of every `fn` in `source`: from `fn` to the opening brace of its
+/// body, so a multi-line signature is captured whole.
+///
+/// Walks parentheses and brackets the way [`function_body_span`] does and
+/// carries the same assumption — no unbalanced brace inside a signature — so a
+/// signature that breaks it is truncated rather than silently reinterpreted.
+/// Reading headers instead of bodies is what lets a uniqueness check survive a
+/// rename: a function can be identified by its shape rather than by the name it
+/// happens to carry today.
+fn function_headers(source: &str) -> Vec<&str> {
+    let mut headers = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("fn ") {
+        let tail = &rest[start..];
+        let mut depth = 0_i32;
+        let end = tail.char_indices().find_map(|(offset, ch)| match ch {
+            '(' | '[' => {
+                depth += 1;
+                None
+            }
+            ')' | ']' => {
+                depth -= 1;
+                None
+            }
+            '{' if depth == 0 => Some(offset),
+            _ => None,
+        });
+        // A `fn` with no readable body ends the scan: nothing past it can be a
+        // declaration whose header we could take.
+        let Some(end) = end else {
+            break;
+        };
+        headers.push(&tail[..end]);
+        rest = &tail[end..];
+    }
+    headers
+}
+
 /// Index of `needle` in `haystack`, or a panic naming the property.
 fn require_index(haystack: &str, needle: &str, what: &str) -> usize {
     haystack
@@ -141,13 +188,16 @@ fn require_index(haystack: &str, needle: &str, what: &str) -> usize {
 ///
 /// The record's "discovery stays off" rule is that **every** client builder
 /// calls `.no_proxy()` before a selected route is added, and that no
-/// unconfigured client can be constructed to bypass it. `tests/http.rs`
-/// already pins the same two controls, but scoped to `http.rs` only and
-/// behind `#![cfg(feature = "http")]`, so it does not run in the default
-/// gate. This is the crate-wide superset: it walks every `src/*.rs` module
-/// and additionally bans an `unwrap_or_else` fallback, which the record
-/// forbids because a silent fallback client would restore reqwest's default
-/// `auto_sys_proxy = true` while still looking fail-closed.
+/// unconfigured client can be constructed to bypass it. This test is the only
+/// pin of that rule. It walks every `src/*.rs` module, so a new module cannot
+/// open a construction path unscanned, and additionally bans an
+/// `unwrap_or_else` fallback, which the record forbids because a silent
+/// fallback client would restore reqwest's default `auto_sys_proxy = true`
+/// while still looking fail-closed. It is not feature-gated, so it holds in
+/// the default leg too, where `src/http.rs` is on disk but not compiled.
+/// `tests/http.rs` used to carry a narrower copy of the same two assertions,
+/// scoped to `src/http.rs` and behind `#![cfg(feature = "http")]`; it was
+/// deleted rather than kept in parallel.
 #[test]
 fn every_client_construction_site_disables_ambient_discovery() {
     const BANNED_CONSTRUCTORS: [&str; 3] =
@@ -263,10 +313,24 @@ fn credential_check_precedes_proxy_injection_on_the_environment_path() {
 ///
 /// This is the record's one-injection-point rule: every proxy URL, whatever
 /// its source, passes one shared validation function, and a future PAC
-/// evaluator must call that same function rather than get a second path. Two
-/// pins hold it: each helper is defined exactly once in the crate, and
-/// `proxy_client` re-checks credentials before its own `Proxy::all` call
-/// rather than trusting its caller.
+/// evaluator must call that same function rather than get a second path.
+///
+/// Three things hold it, and each closes a hole the others leave:
+///
+/// - The injection sites are pinned by *call*, not by name: every
+///   `reqwest::Proxy`/`.proxy(` in the crate must sit inside one of the four
+///   named construction functions. This is the name-independent half, and it is
+///   what catches a second validator that is actually used — a rename, a new
+///   module, or a copy of the helper.
+/// - The two helpers are counted by name, which confines them to `http.rs` and
+///   pins the spelling the record cites.
+/// - The validator is counted again by *shape*, so a renamed drop-in duplicate
+///   is caught even though it matches no pinned spelling. A duplicate whose
+///   return type differs is not drop-in, and then the two ordering pins —
+///   `credential_check_precedes_proxy_injection_on_the_explicit_path` and
+///   `credential_check_precedes_proxy_injection_on_the_environment_path`, which
+///   require the call by name in `explicit` and `from_env` — fail instead.
+///   Between them there is no rename that passes silently.
 #[test]
 fn proxy_injection_stays_inside_the_named_construction_paths() {
     /// The only functions allowed to touch `reqwest::Proxy` or `.proxy(`.
@@ -283,6 +347,11 @@ fn proxy_injection_stays_inside_the_named_construction_paths() {
         "reqwest::Proxy::https(",
         ".proxy(",
     ];
+    /// The one signature a shared proxy-URL validator can have: it takes the
+    /// scope it will build a `reqwest::Proxy` for and returns the validated
+    /// URL or the typed error. `reqwest_proxy` shares the parameter and not the
+    /// error, so the shape separates them.
+    const VALIDATOR_SHAPE: [&str; 3] = ["ProxyScope", "-> Result<", "NetworkError"];
 
     for (module, source) in crate_source_files() {
         for call in INJECTION_CALLS {
@@ -320,6 +389,37 @@ fn proxy_injection_stays_inside_the_named_construction_paths() {
             );
         }
     }
+
+    // The same validator counted by shape instead of by name, so a renamed
+    // drop-in duplicate fails here rather than passing a check that only knows
+    // one spelling. Zero matches fails too: if `ProxyScope` or the error type
+    // is ever renamed this pin must redden, not go quietly vacuous.
+    let sources = crate_source_files();
+    let validators: Vec<(&str, &str)> = sources
+        .iter()
+        .flat_map(|(module, source)| {
+            function_headers(source)
+                .into_iter()
+                .filter(|header| VALIDATOR_SHAPE.iter().all(|part| header.contains(part)))
+                .map(move |header| (module.as_str(), header))
+        })
+        .collect();
+    let mut shapes = validators.iter();
+    let Some((module, header)) = shapes.next() else {
+        panic!("no function in the crate has the shared proxy-URL validator signature")
+    };
+    assert!(
+        header.contains("fn validated_proxy_url("),
+        "the crate's only proxy-URL validator is {header} in {module}, not \
+         validated_proxy_url; either the rename is recorded in the decision or the \
+         shared validator is split, which is a second injection path"
+    );
+    assert!(
+        shapes.next().is_none(),
+        "a second proxy-URL validator exists besides the one in {module}: a second \
+         validator is a second injection path, and a new proxy source must call \
+         validated_proxy_url instead of getting a path of its own"
+    );
 
     let source = http_source();
     let body = function_body(&source, "proxy_client");

@@ -59,8 +59,8 @@ base and needs no rebase. Its live shape is an early return in
 (`http.rs:326` on that commit), which keeps the base's credential predicate
 and validator at `http.rs:813` and `http.rs:822`, and adds
 `explicit_proxy_with_credentials_is_rejected` (`tests/http.rs:453`). That
-commit's superseded predecessor `f51240a` is on no ref and is cited nowhere
-in this record.
+commit's superseded predecessor `f51240a` is on no ref, and no claim in this
+record rests on it.
 
 ## How this record justifies its claims
 
@@ -77,7 +77,7 @@ Statements about the tree at the base pin. Re-verify when the base moves.
   (`http.rs:284-290`).
 - The three **proxy** variables each pass `validated_proxy_url`
   (`http.rs:807-812`) before a client is built, and a rejected value sets
-  `proxy_rejected` (`http.rs:303`) so every request fails closed
+  `proxy_rejected` (`http.rs:318`) so every request fails closed
   (`http.rs:355-361`) instead of going direct.
 - The **bypass list** deliberately does not: `NO_PROXY`/`no_proxy` are
   comma-joined unvalidated at `http.rs:889-895`, and an entry there can only
@@ -123,8 +123,9 @@ Statements about a divergence row above. Re-verify when that ref moves.
 
 Requirements, not facts. Each is enforced by one named test in
 `crates/bitty-network/tests/pac_decision_pins.rs`, so a change that breaks one
-fails the suite instead of quietly falsifying this record. All of them run
-under `just check`, `just check-http`, and `just check-websocket`.
+fails the suite instead of quietly falsifying this record. Seven of the eight
+run in the default leg; all eight run under `just check-http` and
+`just check-websocket`.
 
 1. **Ambient discovery is off at every client construction site, and no
    fallback client can exist.** Every `Client::builder()` chain in every
@@ -142,12 +143,17 @@ under `just check`, `just check-http`, and `just check-websocket`.
 4. **The environment path checks credentials before it injects a proxy**, so
    a rejected value sets `proxy_rejected` instead of reaching a client.
    Test: `credential_check_precedes_proxy_injection_on_the_environment_path`.
-5. **There is exactly one injection point.** `validated_proxy_url` and
-   `proxy_url_has_credentials` are each defined once in the crate,
-   `reqwest::Proxy`/`.proxy(` appear only inside `client_with`,
-   `proxy_client`, `reqwest_proxy`, and `proxy_route_client`, and
-   `proxy_client` re-checks before its own `Proxy::all` rather than trusting
-   its caller.
+5. **There is exactly one injection point.** Every `reqwest::Proxy`/`.proxy(`
+   in the crate must sit inside `client_with`, `proxy_client`,
+   `reqwest_proxy`, or `proxy_route_client`, which is checked by call rather
+   than by name, so no second validator escapes it under any name. The
+   validator is then counted three ways: `validated_proxy_url` and
+   `proxy_url_has_credentials` are each defined once and only in `http.rs`;
+   exactly one function in the crate has the shared validator signature, so a
+   renamed drop-in copy fails too; and `explicit` and `from_env` must still
+   call it by that name before injecting, so a rename of the original fails as
+   well. `proxy_client` re-checks before its own `Proxy::all` rather than
+   trusting its caller.
    Test: `proxy_injection_stays_inside_the_named_construction_paths`.
 6. **A credential-bearing explicit proxy URL fails closed without dialing**:
    `NetworkError::Offline`, no credential echoed, zero connections.
@@ -163,21 +169,28 @@ A control that does not exist yet fails its pin, which is intended: every
 control this record relies on is unmerged work, and a silently dropped
 control is a security defect rather than a documentation nit.
 
-`tests/http.rs` already pins the same two egress controls with
-`every_client_builder_disables_ambient_proxy_and_redirects`, and already
-exercises the ambient rejection end to end with
+`tests/http.rs` still exercises the ambient rejection end to end with
 `ambient_proxy_environment_is_explicit_and_credential_safe` (which re-execs
 itself as a child process, because mutating the environment is `unsafe` in
-edition 2024 and this crate forbids `unsafe_code`). Those pins are
-referenced, not restated. The file above adds three things they do not
-cover: crate-wide scope instead of `http.rs` alone, the `unwrap_or_else`
-fallback ban, and the _ordering_ of the credential check against proxy
-injection — which no behavioural test can distinguish, because "validated
-before injecting" and "validated, and injected anyway" look identical from
-outside the process. Note also that
-`every_client_builder_disables_ambient_proxy_and_redirects` sits behind
-`#![cfg(feature = "http")]`, so it does not run in the default gate; the
-pins above are deliberately not feature-gated, so they run in every leg.
+edition 2024 and this crate forbids `unsafe_code`); that pin is referenced,
+not restated. Its former companion
+`every_client_builder_disables_ambient_proxy_and_redirects` is deleted rather
+than kept beside `every_client_construction_site_disables_ambient_discovery`,
+because the pin above is a strict superset of it — the same two builder-chain
+assertions and the same three banned constructors, over every module instead of
+`http.rs` alone, plus the `unwrap_or_else` ban, and in every CI leg instead of
+two — and two scanners for one property drift apart, which is the defect this
+record was rewritten to remove. What the pins above add that no `http.rs` test
+can reach is the single-injection-point rule and the _ordering_ of the
+credential check against proxy injection, which no behavioural test can
+distinguish, because "validated before injecting" and "validated, and injected
+anyway" look identical from outside the process. Note also that
+`tests/http.rs` sits behind `#![cfg(feature = "http")]`, so the pin it still
+owns does not run in the default gate. Seven of the pins above are not
+feature-gated and run in every leg; the eighth,
+`credential_bearing_explicit_proxy_fails_closed_without_dialing`, cannot be
+ungated, because it constructs `HttpNetworkService`, whose re-export
+`lib.rs:69-70` is behind the same feature.
 
 ## Decision
 
@@ -406,7 +419,10 @@ The requirements behind that table:
 - No URL, path, or file content from a PAC source is retained or
   logged. A PAC URL can carry userinfo, so the rule that keeps
   credential-bearing proxy URLs out of logs applies to every string
-  read from that source.
+  read from that source. The existing redaction control is
+  `redacted_url` (`diagnostics.rs:49`), which drops userinfo, query, and
+  fragment and is applied when a URL enters a diagnostic snapshot
+  (`diagnostics.rs:183`).
 - Construction must remain `Result`-shaped on the existing split once
   a source is implemented: an explicitly requested unevaluable source
   returns the typed error to the caller, while an ambient source
@@ -456,16 +472,21 @@ reqwest client in the crate is built in `http.rs`, and all three builder
 chains call `.no_proxy()` before any route is added: `http.rs:380` in
 `client_with`, `http.rs:829` in `proxy_client`, and `http.rs:847` in
 `proxy_route_client`. `websocket.rs` builds no reqwest client at all, so
-there is no second construction path to cover. Two tests pin this. The
-existing `tests/http.rs::every_client_builder_disables_ambient_proxy_and_redirects`
-walks every `Client::builder()` chain in `http.rs` and fails if an
-unconfigured `Client::new()`, `Client::default()`, or `ClientBuilder::new()`
-appears; `tests/pac_decision_pins.rs::every_client_construction_site_disables_ambient_discovery`
-is the crate-wide superset, adds the `unwrap_or_else` fallback ban, and runs
-in the default gate where the `http.rs`-scoped pin does not. Neither is
+there is no second construction path to cover. One test pins this:
+`tests/pac_decision_pins.rs::every_client_construction_site_disables_ambient_discovery`
+walks every `Client::builder()` chain in every module of the crate, fails if
+an unconfigured `Client::new()`, `Client::default()`, or
+`ClientBuilder::new()` appears anywhere, bans the `unwrap_or_else` fallback,
+and runs in all three CI legs. It replaces the narrower
+`tests/http.rs::every_client_builder_disables_ambient_proxy_and_redirects`,
+which covered the same two builder-chain assertions and the same three
+constructors over `http.rs` alone and ran in two of the three legs; the
+duplicate is deleted so one scanner owns the property. The pin is not
 vacuous: the pinned reqwest build omits its `system-proxy` feature, so
 `.no_proxy()` has no observable runtime effect here and no behavioural test
-can fail when it is dropped. All of this is unmerged.
+can fail when it is dropped, and the pin asserts it found at least one
+builder chain rather than passing over an empty scan. All of this is
+unmerged.
 
 In the merged state the two builder chains (`http.rs:210`, `http.rs:438`)
 call neither `.no_proxy()` nor `Policy::none()`, and `origin/main` contains
@@ -530,10 +551,10 @@ Rules for any future system/PAC work:
   environment and platform configuration cannot influence the selected
   client, and a review that finds discovery re-enabled returns a
   security defect, not a feature request.
-  `every_client_builder_disables_ambient_proxy_and_redirects` already pins
-  the client-builder half on the base; the ambient half still needs the
-  tier-2 gate to be meaningful, and the crate-wide pins above must stay
-  green when it lands.
+  `every_client_construction_site_disables_ambient_discovery` already pins
+  the client-builder half on the base, at crate scope and in every CI leg;
+  the ambient half still needs the tier-2 gate to be meaningful, and the
+  crate-wide pins above must stay green when it lands.
 
 ## What this record does not authorize
 
@@ -570,9 +591,8 @@ Revisit criteria, all required before a PAC slice may start:
    of ambient platform settings is claimed.
 6. The one-injection-point and regression-guard rules above built into
    the slice's acceptance, not left to review. The client-builder half is
-   already mechanically pinned by
-   `every_client_builder_disables_ambient_proxy_and_redirects` and, at
-   crate scope, by `crates/bitty-network/tests/pac_decision_pins.rs`; the
+   already mechanically pinned, at crate scope and in every CI leg, by
+   `crates/bitty-network/tests/pac_decision_pins.rs`; the
    slice must extend those pins rather than assume them, and must keep them
    green once the tier-2 gate lands.
 7. PR #44 merged, so that the tier-1 credential check, the fail-closed
@@ -598,3 +618,9 @@ ctx-0034/fix-proxy-feature-gate origin/main` prints the three commits
 - A reviewer re-checking a base-scoped or divergence-scoped fact reaches
   the same conclusion with `git grep`/`git show` at the named commit and
   `file:line`.
+- Give each checkout of this tree its own `CARGO_TARGET_DIR`. Cargo keys a
+  path package by its workspace-relative path, so two checkouts of the same
+  tree sharing one target directory collide on the same unit-graph key and the
+  second build fails over artifacts it did not produce. That is a false red:
+  re-run the gate with a target directory of its own before reading it as a
+  real failure.
