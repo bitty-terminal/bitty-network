@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport with supply-chain approval recorded in `deny.toml`.
 - Capability-gated WebSocket backend over `tungstenite` behind the
   default-off `websocket` feature.
+- Hardened WebSocket transport and plain-HTTP proxy tunneling for issue #38:
+  operation-wide DNS/TCP/CONNECT/handshake/receive/send/close deadlines,
+  frame/message/aggregate byte and count budgets, bounded pending writes,
+  fail-closed CONNECT parsing with tunnel-byte preservation, and explicit
+  rejection of authenticated proxy URLs until credential policy lands.
 - Opt-in response transfer budget in the HTTP backend: over-budget responses
   fail closed with the previously reserved `NetworkError::Budget`.
 - Fail-closed egress port and method-verb checks in the capability gate
