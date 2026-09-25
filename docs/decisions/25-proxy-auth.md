@@ -1,7 +1,8 @@
 # #25: authenticated proxy credentials — fail-closed policy
 
-Status: proposed; design-stage security-corpus review corrected by CTX-0037;
-authenticated proxy support is not implemented on the reviewed baseline.
+Status: proposed; design-stage security-corpus review corrected by CTX-0037 and
+CTX-0039; authenticated proxy support is not implemented on the reviewed
+baseline.
 
 Parent: #15 (BN-2 policy depth slice).
 
@@ -158,14 +159,18 @@ location, the implementation:
    generation, attachment, and lease;
 4. removes the prior proxy authorization and every hop-specific connection or
    tunnel; and
-5. rebuilds host headers and strips caller `Authorization`, `Cookie`, and
-   `Proxy-Authorization` whenever the destination origin changes.
+5. rebuilds host headers and strips caller `Authorization` and `Cookie`, and
+   removes caller `Proxy-Authorization`, whenever either the destination origin
+   or the proxy origin changes.
 
 The old authorization, client, pooled connection, and tunnel cannot be reused
 when either origin changes. A path-only change on the same proxy origin,
 destination origin, scope epoch, and generation may reuse only a connection
 from that exact pool key with a current lease. Header stripping and fresh
-authorization are still required for that hop.
+authorization are still required for that hop. Sensitive headers are stripped
+before dispatch whenever either origin changes, including a proxy-origin-only
+change to a different forward proxy; this decision does not rely on tunnel
+confidentiality to retain them.
 
 A redirect response is accepted as an origin redirect only when the transport
 can prove it came from the tunneled destination. A `3xx` produced by a proxy,
@@ -213,14 +218,21 @@ A pool key is a structured value containing at least:
 
 - canonical proxy origin;
 - canonical destination origin;
+- the stable, non-secret credential-record identity;
 - credential generation; and
 - scope epoch.
 
-The key may include transport and protocol discriminants, but no code path may
-omit one of these four fields. A client, pool, connection, authorization
-attachment, or tunnel is owned by exactly one registry entry and is accessible
-only while holding a lease obtained from that entry. Shared clients cannot be
-reached through an unscoped service field.
+The identity is a collision-free, provider-scoped non-secret record identity,
+never secret material. The key may include transport and protocol
+discriminants, but no code path may omit any of these five fields. Generation
+and scope epoch are not assumed globally unique across records: two different
+records with equal generation and scope epoch must still have different pool
+keys and can never share a pool. An equivalent globally unique opaque
+credential generation is permitted only when it has the same collision-free
+property. A client, pool, connection, authorization attachment, or tunnel is
+owned by exactly one registry entry and is accessible only while holding a
+lease obtained from that entry. Shared clients cannot be reached through an
+unscoped service field.
 
 Checkout occurs under the registry synchronization protocol. While holding its
 read-side guard, the implementation reloads the current record snapshot,
@@ -250,7 +262,10 @@ check-and-write operation holds a shared synchronization guard, reloads the
 current scope and generation, verifies that the lease is active, and writes
 only while that guard remains held. Rotation takes the exclusive guard before
 publishing retirement. Consequently, a write that passed an earlier boundary
-either completes before retirement is published or cannot begin afterward.
+either completes before retirement is published or cannot begin afterward. This
+is a realizable local linearization, not physical network atomicity: the shared
+guard must remain held through the complete underlying write and any required
+transport flush before the check-and-write operation can complete.
 
 Rotation is a fail-closed state transition, not an operator instruction to
 overlap credentials:
@@ -261,10 +276,14 @@ overlap credentials:
    shutdown. A shutdown timeout faults authenticated proxy use; it does not
    activate the replacement.
 3. Require remote revocation of the old credential and a confirmation bound to
-   the canonical proxy origin and old credential identifier. The confirmation
-   must prove that an authentication attempt using the old credential is
-   rejected and that the replacement is accepted, without exposing either
-   secret in evidence.
+   the canonical proxy origin and old credential identifier. Before the
+   replacement can be activated, the confirmation must prove that every
+   already-authenticated proxy session using the old credential has been
+   terminated and cannot continue, or that an authenticated, current inventory
+   proves that no such session remains; a fresh authentication rejection alone
+   is insufficient. It must also prove that an authentication attempt using the
+   old credential is rejected and that the replacement is accepted, without
+   exposing either secret in evidence.
 4. Publish the new generation and any changed scope epoch only after the
    confirmation. Reopen new leases only after all old state has been invalidated
    and destroyed.
@@ -361,7 +380,12 @@ implement `Serialize` or `Deserialize`. Configuration, snapshot, IPC, metrics,
 and diagnostic serialization requires a separate sanitized data type whose
 fields are an explicit allowlist; implementing a serde trait on a raw provider,
 request, client, connection, tunnel, attachment, lease, or error type to later
-hide fields is prohibited. Serialization failure messages must be redacted too.
+hide fields is prohibited. No raw or sanitized projection may use
+`#[serde(flatten)]`, a flattened helper type, or an arbitrary map or other
+dynamic map as a serialization escape hatch. Sanitized projections must be
+statically shaped: every serialized field is named in the allowlist, with no
+hidden or catch-all field introduced through flattening or dynamic insertion.
+Serialization failure messages must be redacted too.
 
 `PartialEq` and `Eq` are permitted only when the same type has a hand-written
 redacted `Debug` and its fields do not expose secrets through comparison
@@ -494,8 +518,10 @@ required before any authenticated proxy path may be enabled.
 5. Redirect tests prove automatic client redirects are disabled, the owned
    loop is bounded by hop count and total deadline, every destination hop
    reevaluates `NO_PROXY` and obtains fresh scope and authorization, changed
-   origins strip sensitive headers and invalidate connections, path-only reuse
-   is limited to the exact current pool key, and ambiguous provenance fails
+   destination or proxy origins (including a proxy-origin-only change to a
+   different forward proxy) strip `Authorization`, `Cookie`, and
+   `Proxy-Authorization` and invalidate connections, path-only reuse is
+   limited to the exact current pool key, and ambiguous provenance fails
    closed.
 6. Proxy-redirect tests prove that `3xx` from `P1`, including `CONNECT`
    responses and forward-proxy responses outside a tunnel, is rejected before
@@ -503,8 +529,10 @@ required before any authenticated proxy path may be enabled.
    lease reaches `P2`.
 7. Pool tests concurrently exercise checkout, invalidation, and destruction to
    prove that a connection is usable only under a current lease and that pools
-   for different proxy origins, destination origins, generations, or scope
-   epochs are never reused.
+   for different proxy origins, destination origins, credential-record
+   identities, generations, or scope epochs are never reused. Two records with
+   equal generation and scope epoch must still have distinct pools and no
+   authenticated object may cross between them.
 8. Scope tests publish `{A}`, prove its objects cannot serve a newly widened
    `{A,B}` scope, then publish `{A,B}` with a new immutable snapshot and prove
    that every old attachment, client, pool, connection, and tunnel is
@@ -519,15 +547,20 @@ required before any authenticated proxy path may be enabled.
     stale, ambiguous, negative, or impossible revocation leaves authenticated
     proxy use disabled; and an authenticated confirmation bound to proxy origin
     and credential identity permits activation only after the old credential is
-    rejected and the replacement accepted.
+    rejected, all already-authenticated sessions using it are terminated or an
+    authenticated inventory proves that none remain, and the replacement is
+    accepted. A fresh rejection without session termination or proof that none
+    remain is insufficient.
 11. `NO_PROXY` and provider tests prove bypass makes no provider call and sends
     no proxy credential, non-bypass resolves exactly one current record, every
     redirect reevaluates the bypass decision, malformed proxy configuration is
     never ignored, and no path falls back to direct or unauthenticated egress.
 12. Redaction tests cover hand-written `Debug` and `Display` on service,
     provider, record, attachment, lease, client, pool, connection, tunnel,
-    `Request`, `WebSocketRequest`, and error types; forbidden serde traits;
-    failed `PartialEq`/`Eq` assertion output; `expect`/`unwrap`/panic paths;
+    `Request`, `WebSocketRequest`, and error types; forbidden serde traits and
+    explicit rejection of `#[serde(flatten)]` or arbitrary/dynamic-map
+    sanitized projections; failed `PartialEq`/`Eq` assertion output;
+    `expect`/`unwrap`/panic paths;
     third-party `Debug`, `Display`, string conversion, retained source, and
     source chains; tracing span and event attributes; metric descriptors,
     labels, values, and exemplars; raw assertion messages; `dbg!`; snapshots;
