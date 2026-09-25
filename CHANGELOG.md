@@ -80,6 +80,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist and fail. The remaining half — whether a future adapter hands
   over the right string — is not observable until that adapter exists and is
   a wiring-time review obligation.
+- Unified TLS provider for HTTP and WebSocket (CTX-0021, `#21`/`#22`), behind
+  the `http` feature, in `tls` and its new `tls::x509` reader:
+  - A caller-supplied CA bundle is **additive**. It adds validated anchors to
+    the platform's native root store and never replaces, shadows, or disables
+    a native root, and a platform store that cannot be loaded fails closed
+    rather than falling back to custom-only trust. **Supplying a bundle does
+    not restrict native trust** — there is no custom-only mode.
+  - Bundle sources are mutually exclusive (an explicit path or inline PEM, never
+    a URL), read and parsed once at construction, never discovered from the
+    environment or a default location, and one bad entry fails the whole load:
+    no partial trust set.
+  - An admitted anchor must carry `basicConstraints` `CA=TRUE` and, when
+    `keyUsage` is present, `keyCertSign`; use an admitted signature algorithm
+    and public-key algorithm and key size; and parse its subject and issuer.
+    Validity is `notBefore <= now < notAfter` with no grace period, checked at
+    construction and again before every new TLS destination. Path building,
+    path length, and name constraints stay with `rustls`/`rustls-webpki`.
+  - Client identity is off by default, indivisible (chain _and_ key), and
+    selected per new TLS destination by exact canonical host after IDNA
+    normalization — no wildcard, no suffix, no default, reselected on redirect,
+    never selected by the proxy authority, and never reused across hosts because
+    each identity gets its own client and pool. A rule never waives the name,
+    chain, validity, or key-use checks, and an unusable identity is a typed
+    failure rather than a silent "no client certificate".
+  - New policy vocabulary in `bitty-network-api`: `TlsConfig`, `PemSource`,
+    `ClientIdentity`, `ClientIdentityRule`, the `TlsFailure` taxonomy, and
+    `NetworkError::Tls`. The crate stays dependency-free and the vocabulary
+    still moves no byte.
+  - No new crate enters the shipped dependency graph: `rustls`,
+    `rustls-platform-verifier`, `rustls-pki-types`, `idna`, and `zeroize` were
+    already resolved through the reqwest and tungstenite trees and become
+    direct dependencies here; X.509 attribute parsing is a self-contained strict
+    DER reader rather than a new parsing dependency. `rcgen` is a dev-dependency
+    only, so tests mint their CA and keys at runtime and no certificate or key
+    fixture is committed.
 
 ### Changed
 
@@ -98,6 +133,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credential-bearing proxy URLs rejected) come from CTX-0028 and are
   unaffected by this feature.
 - Pinned the `idna_adapter` and ICU tree to 1.85-compatible versions.
+- CTX-0021 makes the HTTP backend hold one client per TLS identity slot instead
+  of one client per egress route, so a client-identity policy can be expressed
+  at all. The egress controls are unchanged and now have a single
+  implementation: every client still carries `.no_proxy()` and `Policy::none()`
+  before anything else is injected, credential-bearing proxy URLs are still
+  rejected before a client is built, and the client constructors the decision
+  record cites by signature still exist and are still reached.
+- CTX-0021 pins `time` to an MSRV-1.85-compatible release, as a dev-dependency
+  of the test-only certificate generation, and records one narrowly justified
+  advisory exception in `deny.toml` for it (dev-only, unreachable RFC 2822
+  parser, and the fix needs rustc 1.88).
+- CTX-0021 resolves three defects found reviewing the inherited
+  implementation. An explicit proxy is no longer dropped when a TLS policy is
+  configured: the per-identity client applies every configured proxy scope
+  instead of collapsing the route to a single all-scope URL, which had sent
+  proxied traffic direct. A plaintext `ws://` handshake no longer evaluates the
+  TLS policy, so an anchor that has expired since construction cannot refuse a
+  connection that reads no trust anchor. An inline key source is parsed in
+  place rather than copied into a second heap buffer.
 
 ### Security
 
@@ -132,3 +186,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   access exists anywhere in the crate graph; the default `bitty` binary stays
   network-free and this runtime enters only when a network-capable consumer
   is installed.
+- CTX-0021 adds no trust surface by default: with no `TlsConfig` the backends
+  keep their own native-root construction untouched, and a supplied bundle
+  cannot narrow what is trusted. Private keys, inline key bytes, and
+  credential-bearing paths never reach `Debug`, `Display`, an error string, or
+  a serialization surface; the key-bearing types use hand-written redacting
+  `Debug` and hand-written zeroing drops, and the crate takes no `serde`
+  dependency at all, so no configuration, snapshot, IPC, or test-artifact
+  representation exists that could carry key material. A canary test proves it
+  against a key generated at runtime.
+- CTX-0021 revocation policy is unchanged and is the one requirement the record
+  defers to review rather than to code: chain verification is `rustls-webpki`'s
+  and performs no revocation checking, exactly as the pinned base did. Making
+  revocation mandatory is a new decision with its own compatibility impact, not
+  something this change could add quietly.
+- CTX-0021 does not rely on `rustls-platform-verifier` to fail closed. In 0.7.0
+  `new_with_extra_roots` adds the supplied roots to the store _before_ reading
+  the platform store and refuses only an empty store, so a platform store that
+  yields nothing would leave a verifier trusting exactly the supplied
+  certificates — the custom-only mode the decision record does not define. The
+  provider therefore proves the native load with an independent extra-root-free
+  read and refuses with `TlsFailure::NativeRootsUnavailable`. The probe runs
+  only when custom roots are supplied, which is the only case where the store is
+  non-empty beforehand.
+- CTX-0021 records one limit it cannot close from here: `rustls` 0.23.45
+  zeroizes its record buffers, ciphers, and HMACs, but does not wipe a client's
+  signing key when a configuration is dropped. The provider keeps no second copy
+  of a key — an inline source is parsed in place and a path read is zeroized on
+  the way out — and the remaining copy is owned by the pinned crypto provider.
+  Tightening it would mean replacing that provider, which is a new decision.

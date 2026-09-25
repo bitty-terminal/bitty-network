@@ -123,6 +123,8 @@ use bitty_network_api::{
 };
 use reqwest::header::{HeaderName, HeaderValue};
 
+use crate::tls::{TlsProvider, TlsTransport};
+
 /// Only the fail-closed `websocket()` (without the `websocket` feature)
 /// resolves to the offline socket; with the feature the socket comes from
 /// `crate::websocket`.
@@ -218,6 +220,8 @@ type HopResponse = (u16, Vec<(String, String)>, reqwest::blocking::Response);
 #[derive(Clone)]
 pub struct HttpNetworkService {
     capability: NetworkCapability,
+    /// The shared TLS policy: trust composition and client-identity selection.
+    provider: TlsProvider,
     egress: Egress,
 }
 
@@ -227,6 +231,7 @@ impl std::fmt::Debug for HttpNetworkService {
             .field("capability", &self.capability)
             .field("proxy_configured", &self.egress.route.configured())
             .field("proxy_rejected", &self.egress.proxy_rejected)
+            .field("tls", &self.provider)
             .finish_non_exhaustive()
     }
 }
@@ -238,54 +243,56 @@ enum ProxyScope {
     Https,
 }
 
+/// The configured proxy URLs, snapshotted at construction.
+///
+/// This is intent only: the clients that speak to those URLs are built in
+/// [`Egress`], one per TLS identity slot, because a client's TLS configuration
+/// is fixed at build time and a client-identity policy is per destination.
 #[derive(Clone, Default)]
 struct ProxyRoute {
     http: Option<String>,
     https: Option<String>,
     all: Option<String>,
-    client: Option<reqwest::blocking::Client>,
 }
 
 impl ProxyRoute {
     fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {
         let all = validated_proxy_url(proxy_url, ProxyScope::All)?;
-        let client = proxy_client(&all).ok_or(NetworkError::Offline)?;
-        let route = Self {
+        Ok(Self {
             all: Some(all),
             ..Self::default()
-        };
-        Ok(Self {
-            client: Some(client),
-            ..route
         })
     }
 
     fn from_env() -> Result<Self, NetworkError> {
-        let http = proxy_from_env(&HTTP_PROXY_VARS)
-            .map(|url| validated_proxy_url(&url, ProxyScope::Http))
-            .transpose()?;
-        let https = proxy_from_env(&HTTPS_PROXY_VARS)
-            .map(|url| validated_proxy_url(&url, ProxyScope::Https))
-            .transpose()?;
-        let all = proxy_from_env(&ALL_PROXY_VARS)
-            .map(|url| validated_proxy_url(&url, ProxyScope::All))
-            .transpose()?;
-        let route = Self {
-            http,
-            https,
-            all,
-            client: None,
-        };
-        let client = if route.configured() {
-            Some(proxy_route_client(&route).ok_or(NetworkError::Offline)?)
-        } else {
-            None
-        };
-        Ok(Self { client, ..route })
+        Ok(Self {
+            http: proxy_from_env(&HTTP_PROXY_VARS)
+                .map(|url| validated_proxy_url(&url, ProxyScope::Http))
+                .transpose()?,
+            https: proxy_from_env(&HTTPS_PROXY_VARS)
+                .map(|url| validated_proxy_url(&url, ProxyScope::Https))
+                .transpose()?,
+            all: proxy_from_env(&ALL_PROXY_VARS)
+                .map(|url| validated_proxy_url(&url, ProxyScope::All))
+                .transpose()?,
+        })
     }
 
     fn configured(&self) -> bool {
         self.http.is_some() || self.https.is_some() || self.all.is_some()
+    }
+
+    /// The configured routes, in the order they are added to a client.
+    ///
+    /// All three go on the same client, as before: the per-request decision in
+    /// [`HttpNetworkService::selected_proxy`] picks which URL a hop uses, and
+    /// the client applies its scheme-scoped proxies.
+    fn entries(&self) -> [(Option<&str>, ProxyScope); 3] {
+        [
+            (self.http.as_deref(), ProxyScope::Http),
+            (self.https.as_deref(), ProxyScope::Https),
+            (self.all.as_deref(), ProxyScope::All),
+        ]
     }
 
     fn for_url(&self, url: &str) -> Option<&str> {
@@ -302,12 +309,65 @@ impl ProxyRoute {
 /// The proxy URLs and bypass list are snapshotted at construction so the
 /// per-request decision is a pure function of the request URL and host (see
 /// [`select_proxy`]).
+///
+/// Clients come in one set per TLS identity slot, indexed the same way the
+/// provider numbers them: slot 0 presents no client certificate. A slot gets its
+/// own client, and therefore its own connection pool, so a connection
+/// authenticated with one client identity is never reused for another identity
+/// or for another host — `reqwest` only reuses a pooled connection for the
+/// origin it was opened for.
 #[derive(Clone)]
 struct Egress {
-    direct: Option<reqwest::blocking::Client>,
+    direct: Vec<Option<reqwest::blocking::Client>>,
+    proxied: Vec<Option<reqwest::blocking::Client>>,
     route: ProxyRoute,
     no_proxy: String,
     proxy_rejected: bool,
+}
+
+impl Egress {
+    /// Build one client per TLS identity slot for each egress route.
+    ///
+    /// A slot's clients are built once, at construction, from the provider's
+    /// configuration for that slot: slot 0 gets the trust set with no client
+    /// certificate, and every later slot gets that same trust set plus its own
+    /// identity. Building them here is what makes "no cross-host pooled reuse"
+    /// structural — each identity has a separate pool, and `reqwest` only reuses
+    /// a pooled connection for the origin it was opened for.
+    fn build(provider: &TlsProvider, route: &ProxyRoute) -> Result<Self, NetworkError> {
+        let slots = provider.identity_slot_count();
+        let mut direct = Vec::with_capacity(slots);
+        let mut proxied = Vec::with_capacity(slots);
+        for slot in 0..slots {
+            let tls = provider.config_for_slot(TlsTransport::Http, slot);
+            let configured = tls.is_some();
+            let direct_client = if configured {
+                HttpNetworkService::client_with_tls(None, tls.clone())
+            } else {
+                HttpNetworkService::client_with(None)
+            };
+            direct.push(direct_client);
+            if route.configured() {
+                // A configured route that cannot produce a client fails the
+                // construction, exactly as it did when there was one client:
+                // the service then refuses every request instead of silently
+                // switching to direct egress.
+                let client = if configured {
+                    HttpNetworkService::client_with_tls(Some(route), tls)
+                } else {
+                    native_only_route_client(route)
+                };
+                proxied.push(Some(client.ok_or(NetworkError::Offline)?));
+            }
+        }
+        Ok(Self {
+            direct,
+            proxied,
+            route: route.clone(),
+            no_proxy: String::new(),
+            proxy_rejected: false,
+        })
+    }
 }
 
 impl HttpNetworkService {
@@ -323,32 +383,103 @@ impl HttpNetworkService {
     /// construction performs no I/O.
     #[must_use]
     pub fn new(capability: NetworkCapability) -> Self {
+        // The default policy builds no client that can fail, so this cannot
+        // fail; the fallback exists so the infallible signature stays honest
+        // rather than panicking if that ever changes.
+        match Self::with_provider(capability.clone(), TlsProvider::native_only()) {
+            Ok(service) => service,
+            Err(_) => Self::offline(capability),
+        }
+    }
+
+    /// Serve HTTP under `capability` with an explicit TLS policy.
+    ///
+    /// The provider is the crate's [`TlsProvider`], built once from a
+    /// [`TlsConfig`](bitty_network_api::TlsConfig): its CA bundle is *added* to
+    /// the platform's native roots, and its client identities are selected per
+    /// new TLS destination by exact canonical host. Build the provider
+    /// separately so a policy failure surfaces as a typed
+    /// [`TlsFailure`](bitty_network_api::TlsFailure) at the point of
+    /// configuration instead of here, where it would have to share a category
+    /// with the proxy.
+    ///
+    /// The proxy decision is unchanged: the environment snapshot, and only with
+    /// the `proxy` feature. Construction still performs no network I/O.
+    pub fn with_tls(
+        capability: NetworkCapability,
+        provider: TlsProvider,
+    ) -> Result<Self, NetworkError> {
+        Self::with_provider(capability, provider)
+    }
+
+    /// Serve HTTP under `capability` with an explicit TLS policy and one
+    /// explicit proxy URL.
+    ///
+    /// The proxy override and the TLS policy are orthogonal, so both can be set
+    /// at once; the proxy authority is never the client-identity selector.
+    pub fn with_tls_and_proxy(
+        capability: NetworkCapability,
+        provider: TlsProvider,
+        proxy_url: &str,
+    ) -> Result<Self, NetworkError> {
+        let route = ProxyRoute::explicit(proxy_url)?;
+        Self::from_egress(capability, provider, route, String::new(), false)
+    }
+
+    /// Deny-all construction of last resort, used only when a client cannot be
+    /// built: it keeps the service fail-closed instead of leaving a hole.
+    fn offline(capability: NetworkCapability) -> Self {
+        Self {
+            capability,
+            provider: TlsProvider::native_only(),
+            egress: Egress {
+                direct: Vec::new(),
+                proxied: Vec::new(),
+                route: ProxyRoute::default(),
+                no_proxy: String::new(),
+                proxy_rejected: true,
+            },
+        }
+    }
+
+    fn with_provider(
+        capability: NetworkCapability,
+        provider: TlsProvider,
+    ) -> Result<Self, NetworkError> {
         if !crate::proxy::env_proxy_enabled() {
-            return Self::from_egress(capability, ProxyRoute::default(), String::new(), false);
+            return Self::from_egress(
+                capability,
+                provider,
+                ProxyRoute::default(),
+                String::new(),
+                false,
+            );
         }
         let no_proxy = no_proxy_from_env();
         let (route, proxy_rejected) = match ProxyRoute::from_env() {
             Ok(route) => (route, false),
             Err(_) => (ProxyRoute::default(), true),
         };
-        Self::from_egress(capability, route, no_proxy, proxy_rejected)
+        Self::from_egress(capability, provider, route, no_proxy, proxy_rejected)
     }
 
     fn from_egress(
         capability: NetworkCapability,
+        provider: TlsProvider,
         route: ProxyRoute,
         no_proxy: String,
         proxy_rejected: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, NetworkError> {
+        let egress = Egress::build(&provider, &route)?;
+        Ok(Self {
             capability,
+            provider,
             egress: Egress {
-                direct: Self::client_with(None),
-                route,
                 no_proxy,
                 proxy_rejected,
+                ..egress
             },
-        }
+        })
     }
 
     /// Serve HTTP under `capability` via one explicit proxy URL.
@@ -362,8 +493,7 @@ impl HttpNetworkService {
         capability: NetworkCapability,
         proxy_url: &str,
     ) -> Result<Self, NetworkError> {
-        let route = ProxyRoute::explicit(proxy_url)?;
-        Ok(Self::from_egress(capability, route, String::new(), false))
+        Self::with_tls_and_proxy(capability, TlsProvider::native_only(), proxy_url)
     }
 
     fn ensure_proxy_usable(&self) -> Result<(), NetworkError> {
@@ -380,30 +510,118 @@ impl HttpNetworkService {
         &self.capability
     }
 
-    /// Build one shared client around `proxy` (`None` for direct egress).
+    /// The builder every reqwest client in this backend is constructed from.
     ///
-    /// System-proxy discovery is disabled before the checked proxy is
-    /// injected, so reqwest cannot introduce an ambient route later. Redirect
-    /// following is disabled (`Policy::none`): every hop is canonicalized and
-    /// re-authorized in [`send`](Self::send) instead, so the capability sees
-    /// each destination before it is contacted. A builder error cannot arise
-    /// for this fixed construction, but it is propagated as `None`; every
-    /// caller fails closed rather than constructing an unsafe fallback.
-    fn client_with(proxy: Option<reqwest::Proxy>) -> Option<reqwest::blocking::Client> {
-        let mut builder = reqwest::blocking::Client::builder()
+    /// Both egress controls are set here, before anything else is injected, so
+    /// there is exactly one implementation of each and no constructor can be
+    /// added without them: system/PAC discovery is disabled (`.no_proxy()`), so
+    /// reqwest cannot introduce an ambient route later, and redirect following
+    /// is disabled (`Policy::none`), so every `3xx` hop is canonicalized and
+    /// re-authorized in [`send`](Self::send) instead of being followed with the
+    /// capability's consent implied.
+    fn controlled_builder() -> reqwest::blocking::ClientBuilder {
+        reqwest::blocking::Client::builder()
             .no_proxy()
-            .redirect(reqwest::redirect::Policy::none());
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(proxy);
+            .redirect(reqwest::redirect::Policy::none())
+    }
+
+    /// Build one shared client around `proxy` (`None` for direct egress) on the
+    /// platform's native roots.
+    ///
+    /// The native-roots form of [`HttpNetworkService::client_with_tls`], kept as
+    /// its own function because it is the shape every client has when no TLS
+    /// policy is configured. A builder error cannot arise for this fixed
+    /// construction, but it is propagated as `None`; every caller fails closed
+    /// rather than constructing an unsafe fallback.
+    fn client_with(proxy: Option<reqwest::Proxy>) -> Option<reqwest::blocking::Client> {
+        let builder = Self::controlled_builder();
+        let builder = match proxy {
+            Some(proxy) => builder.proxy(proxy),
+            None => builder,
+        };
+        Self::finish_client(builder, None)
+    }
+
+    /// Build one shared client for one TLS identity slot.
+    ///
+    /// `route` is `None` for direct egress and `Some` for the configured proxy
+    /// route; `tls` is the configuration the provider resolved for this slot, and
+    /// `None` keeps the platform's native roots untouched.
+    ///
+    /// This is the only place a client learns a TLS configuration, which is what
+    /// makes "one TLS configuration per identity, per route" a structural fact
+    /// rather than a convention each constructor has to remember.
+    ///
+    /// A configured route applies **every** scope it carries, exactly as
+    /// [`proxy_route_client`] does on the native-roots path. Collapsing the
+    /// route to a single URL here would silently drop an explicit override (whose
+    /// only entry is the all-scope one) and would send proxied traffic direct,
+    /// which is the egress direction this backend must never take by accident.
+    fn client_with_tls(
+        route: Option<&ProxyRoute>,
+        tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+    ) -> Option<reqwest::blocking::Client> {
+        let mut builder = Self::controlled_builder();
+        if let Some(route) = route {
+            for (url, scope) in route.entries() {
+                if let Some(url) = url {
+                    if proxy_url_has_credentials(url) {
+                        return None;
+                    }
+                    builder = builder.proxy(reqwest_proxy(url, scope).ok()?);
+                }
+            }
+        }
+        Self::finish_client(builder, tls)
+    }
+
+    /// Apply the TLS configuration to a controlled builder.
+    fn finish_client(
+        builder: reqwest::blocking::ClientBuilder,
+        tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+    ) -> Option<reqwest::blocking::Client> {
+        let mut builder = builder;
+        if let Some(tls) = tls {
+            // The preconfigured backend takes ownership of the configuration
+            // reqwest would otherwise build for itself, which is how the additive
+            // root set and the selected client identity reach the handshake. It
+            // wants a bare `ClientConfig` — it wraps the argument itself before
+            // downcasting — and a clone, because the provider keeps its own copy
+            // for the WebSocket transport and for the other slots.
+            builder = builder.tls_backend_preconfigured((*tls).clone());
         }
         builder.build().ok()
     }
 
-    fn client_for(&self, url: &str, host: &str) -> Option<&reqwest::blocking::Client> {
-        match self.selected_proxy(url, host) {
-            Some(_) => self.egress.route.client.as_ref(),
-            None => self.egress.direct.as_ref(),
-        }
+    /// The client for one destination: the proxy decision, then the exact-host
+    /// client-identity decision.
+    ///
+    /// Called once per hop, so a redirect reselects from its own target rather
+    /// than inheriting the previous hop's identity. A TLS refusal is a typed
+    /// [`NetworkError::Tls`], never a fall back to the unselected client.
+    fn client_for(
+        &self,
+        url: &str,
+        host: &str,
+    ) -> Result<&reqwest::blocking::Client, NetworkError> {
+        let selection = self
+            .provider
+            .select(TlsTransport::Http, host)
+            .map_err(tls_failure)?;
+        let clients = match self.selected_proxy(url, host) {
+            Some(_) => &self.egress.proxied,
+            None => &self.egress.direct,
+        };
+        // A miss here cannot happen: the egress set is built with one client
+        // per slot. It is still a typed refusal rather than a fallback, because
+        // falling back to another slot's client would present a client
+        // certificate this destination never selected.
+        clients
+            .get(selection.slot())
+            .and_then(Option::as_ref)
+            .ok_or(NetworkError::Tls {
+                reason: bitty_network_api::TlsFailure::IdentityInvalid,
+            })
     }
 
     fn selected_proxy(&self, url: &str, host: &str) -> Option<&str> {
@@ -539,7 +757,7 @@ impl HttpNetworkService {
             HttpMethod::Patch => reqwest::Method::PATCH,
         };
         let host = Request::get(url).host().to_owned();
-        let client = self.client_for(url, &host).ok_or(NetworkError::Offline)?;
+        let client = self.client_for(url, &host)?;
         let mut outgoing = client
             .request(outgoing_method, url.to_owned())
             .timeout(remaining);
@@ -801,6 +1019,7 @@ impl NetworkService for HttpNetworkService {
         crate::websocket::connect(
             request,
             self.proxy_url_for(&request.url, request.host()).as_deref(),
+            &self.provider,
         )
     }
 
@@ -826,28 +1045,6 @@ fn validated_proxy_url(url: &str, scope: ProxyScope) -> Result<String, NetworkEr
     Ok(url.to_owned())
 }
 
-/// Build one proxied shared client for `url`, or `None` when it is not a
-/// credential-free, parseable proxy URL.
-///
-/// System-proxy discovery and redirect following are disabled exactly as in
-/// [`client_with`](HttpNetworkService::client_with): hops are re-authorized
-/// in [`send`](HttpNetworkService::send), never followed by the client.
-fn proxy_client(url: &str) -> Option<reqwest::blocking::Client> {
-    if proxy_url_has_credentials(url) {
-        return None;
-    }
-    let proxy = match reqwest::Proxy::all(url) {
-        Ok(proxy) => proxy,
-        Err(_) => return None,
-    };
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .proxy(proxy)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .ok()
-}
-
 fn reqwest_proxy(url: &str, scope: ProxyScope) -> Result<reqwest::Proxy, ()> {
     match scope {
         ProxyScope::All => reqwest::Proxy::all(url),
@@ -857,15 +1054,36 @@ fn reqwest_proxy(url: &str, scope: ProxyScope) -> Result<reqwest::Proxy, ()> {
     .map_err(|_| ())
 }
 
+/// The native-roots proxied client for one explicit override URL, or `None` when
+/// it is not a credential-free, parseable proxy URL.
+///
+/// System-proxy discovery and redirect following are disabled exactly as in
+/// [`client_with`](HttpNetworkService::client_with): hops are re-authorized in
+/// [`send`](HttpNetworkService::send), never followed by the client.
+fn proxy_client(url: &str) -> Option<reqwest::blocking::Client> {
+    if proxy_url_has_credentials(url) {
+        return None;
+    }
+    let proxy = match reqwest_proxy(url, ProxyScope::All) {
+        Ok(proxy) => proxy,
+        Err(_) => return None,
+    };
+    HttpNetworkService::controlled_builder()
+        .proxy(proxy)
+        .build()
+        .ok()
+}
+
+/// The native-roots proxied client for a snapshotted environment route, or
+/// `None` when one of its URLs does not parse.
+///
+/// Every configured scope goes on the same client, as before. Credential
+/// rejection is not repeated here: [`validated_proxy_url`] already refused a
+/// userinfo-bearing URL on the way in, and this constructor is only reached
+/// from a route that passed it.
 fn proxy_route_client(route: &ProxyRoute) -> Option<reqwest::blocking::Client> {
-    let mut builder = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none());
-    for (url, scope) in [
-        (route.http.as_deref(), ProxyScope::Http),
-        (route.https.as_deref(), ProxyScope::Https),
-        (route.all.as_deref(), ProxyScope::All),
-    ] {
+    let mut builder = HttpNetworkService::controlled_builder();
+    for (url, scope) in route.entries() {
         if let Some(url) = url {
             builder = builder.proxy(reqwest_proxy(url, scope).ok()?);
         }
@@ -873,10 +1091,30 @@ fn proxy_route_client(route: &ProxyRoute) -> Option<reqwest::blocking::Client> {
     builder.build().ok()
 }
 
+/// The native-roots proxied client for `route`, choosing the constructor that
+/// matches the route's shape.
+fn native_only_route_client(route: &ProxyRoute) -> Option<reqwest::blocking::Client> {
+    if route.http.is_none() && route.https.is_none() {
+        route.all.as_deref().and_then(proxy_client)
+    } else {
+        proxy_route_client(route)
+    }
+}
+
 fn url_uses_tls(url: &str) -> bool {
     url.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
     })
+}
+
+/// Map a TLS policy refusal to its typed network error.
+///
+/// A distinct category from [`NetworkError::Offline`] on purpose: the socket may
+/// be perfectly reachable and the refusal is a trust or identity decision, which
+/// an operator has to be able to tell apart from an unreachable host. The
+/// payload is a stable category and never carries a path, a byte, or a PEM.
+fn tls_failure(reason: bitty_network_api::TlsFailure) -> NetworkError {
+    NetworkError::Tls { reason }
 }
 
 /// Map a post-capability transport failure to its typed error.
@@ -970,7 +1208,6 @@ mod tests {
             http: Some("http://http-proxy.test".to_owned()),
             https: Some("http://https-proxy.test".to_owned()),
             all: Some("http://all-proxy.test".to_owned()),
-            client: None,
         };
         assert_eq!(
             route.for_url("http://origin.test"),

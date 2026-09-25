@@ -38,6 +38,27 @@ features = ["http", "websocket"]
 
 [advisories]
 yanked = "deny"
+# RUSTSEC-2026-0009 (stack exhaustion in `time`'s RFC 2822 parser) is the one
+# advisory this repository carries an exception for, and the exception is
+# dev-dependency-only in the strictest sense:
+#
+# - `time` is reached only through `rcgen`, the dev-dependency CTX-0021 added so
+#   the TLS tests mint their CA and keys at runtime. Nothing that ships depends
+#   on it, and `cargo deny` reports it as a dev-path package.
+# - The vulnerable code is `time`'s `Rfc2822` *email-address* format
+#   description. This repository never constructs one: the only use is
+#   `rcgen`'s `date_time_ymd`, which produces an `OffsetDateTime` from calendar
+#   integers. There is no path from a test certificate to a parsed RFC 2822
+#   string.
+# - The fix landed in `time` 0.3.47, whose `rust-version` is 1.88. The
+#   workspace MSRV is 1.85 and is a pin this task may not bump, so "upgrade"
+#   is not available without a decision above this one.
+#
+# Reviewed 2026-09-26 for CTX-0021. Re-check when the MSRV moves: at 1.88 or
+# later this entry should be deleted and `time` raised to >= 0.3.47.
+ignore = [
+    { id = "RUSTSEC-2026-0009", reason = "dev-only, unreachable RFC 2822 parser, and the fix needs rustc 1.88 against a 1.85 MSRV" },
+]
 
 [licenses]
 allow = [
