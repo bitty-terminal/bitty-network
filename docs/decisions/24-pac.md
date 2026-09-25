@@ -1,14 +1,17 @@
-# #24: proxy PAC evaluation — explicit unsupported, fail closed
+# #24: proxy PAC evaluation — explicit unsupported, not fail closed while refusal is silent
 
-Status: decided, docs only — no PAC evaluation in this slice (CTX-0032).
+Status: decided, docs only — explicit unsupported; current refusal is
+silent, not fail closed (CTX-0032).
 
 Parent: #15 (BN-2 policy depth slice).
 
 Builds on: #29 (`docs/decisions/29-proxy.md`) — the intended `proxy`
-feature meaning is environment-inheritance opt-in. On `origin/main` the
-policy predicate exists, but `HttpNetworkService::new` wiring is still
-pending (CTX-0034). This record adds the PAC posture and the tier order
-below; it does not change what the gate is intended to mean.
+feature meaning is environment-inheritance opt-in. On current `origin/main`
+(`de77e17`), the policy predicate exists, but `HttpNetworkService::new`
+still reads the environment unconditionally. The completed but unmerged
+CTX-0034 commit `f51240a` implements that gate, but it is not part of the
+current baseline. This record adds the PAC posture and the tier order below;
+it does not change what the gate is intended to mean.
 
 ## Decision
 
@@ -19,12 +22,16 @@ repository-owned selection uses the two sources below, but reqwest's
 automatic environment matcher is still active on `origin/main` and is
 not covered by that intended contract. Every selected URL must pass one
 credential check before a client is built. That check is not present on
-`origin/main`; the completed CTX-0028 implementation is still unmerged,
-so this record treats it as a pending arrival rather than a current
-control.
+`origin/main`; the completed but unmerged CTX-0028 commit `9fc413e` supplies
+the HTTP/ALL fan-out and credential validation, pending integration. This
+record treats those controls as pending arrivals rather than current
+controls.
 
-This is the explicit unsupported-fail-closed candidate, chosen over
-embedded JavaScript evaluation and over platform lookup.
+The current explicit-unsupported posture is **not fail closed**: a refused
+PAC/system setting is silent today, and direct egress can bypass an operator's
+mandatory path. Fail-closed behavior is a required pre-adoption property for
+a future PAC implementation, not a current control. This posture is chosen
+over embedded JavaScript evaluation and over platform lookup.
 
 ## Why not the alternatives
 
@@ -62,56 +69,66 @@ answer wins, and no lower tier overrides a higher one.
 | Tier | Source                      | State                              |
 | ---- | --------------------------- | ---------------------------------- |
 | 1    | Explicit `with_proxy` URL   | Available today; validation target |
-| 2    | Environment proxy variables | Target; gate not wired             |
+| 2    | Environment proxy variables | Target; current baseline unsafe    |
 | 3    | System settings / PAC file  | Refused, not implemented           |
 
 **Tier 1 — explicit override (available today; full validation is a
 target).** `with_proxy` selects one explicit proxy URL and stays
 available with or without the `proxy` feature: explicit construction is
 a deliberate operator act, not ambient authority (#29). The complete
-userinfo rejection and one-injection-point contract below is a target
-until the explicit URL is validated before client construction; it is
-not a current guarantee.
+userinfo rejection and one-injection-point contract below is supplied by
+completed but unmerged CTX-0028 commit `9fc413e`, pending integration; it
+is not a current `origin/main` guarantee.
 
-**Tier 2 — environment (target; not gated on `origin/main`).** The
-current explicit reader reads `HTTPS_PROXY` first, then `https_proxy`,
-and joins `NO_PROXY` and `no_proxy` as its bypass list. It has no
-`HTTP_PROXY`/`ALL_PROXY` fan-out and no per-variable credential check.
-`HttpNetworkService::new` reads this environment unconditionally, and
-`env_proxy_enabled()` has no non-test caller. With the `proxy` feature
-off, the environment is still inherited: this is the unsafe current
-direction, not fail-closed behavior. CTX-0034 must wire the predicate
-before this record can describe the gate as operative. The fan-out and
-credential check are separate pending implementation work; completed
-CTX-0028 work is not present on this baseline and cannot be treated as
-a landed control.
+**Tier 2 — environment (target; current `origin/main` baseline is
+unsafe).** On current `origin/main`, the explicit reader reads
+`HTTPS_PROXY` first, then `https_proxy`, and joins `NO_PROXY` and
+`no_proxy` as its bypass list. It has no `HTTP_PROXY`/`ALL_PROXY` fan-out
+and no per-variable credential check. `HttpNetworkService::new` reads this
+environment unconditionally, and `env_proxy_enabled()` has no non-test
+caller. With the `proxy` feature off, the environment is still inherited:
+this is the unsafe current baseline, not fail-closed behavior. The
+completed but unmerged CTX-0034 commit `f51240a` implements the feature
+gate by wrapping the environment reads in `env_proxy_enabled()`
+(`http.rs:154-159`) and adds `.no_proxy()` at `http.rs:217-221` and
+`http.rs:444-450`; it does not add HTTP/ALL fan-out or credential
+validation. The completed but unmerged CTX-0028 commit `9fc413e` supplies
+that fan-out and credential validation, as well as its own `.no_proxy()`
+calls. Both lanes are pending integration; neither is merged.
 
 **Tier 3 — system/PAC (refused, not implemented).** No platform
 lookup, no PAC file read, no PAC evaluation, on any platform. A
 `pac:` URL or a platform proxy setting is therefore never a usable
 answer and is never inherited as a PAC route, even with the `proxy`
-gate on. This refusal is separate from the pending gate wiring and
-from reqwest's automatic environment matcher described below.
+gate on. This refusal is separate from the completed but unmerged
+CTX-0034 commit `f51240a` and from reqwest's automatic environment
+matcher described below.
 
-Refusal is total, and therefore silent today: with no system/PAC
-tier, an operator whose machine is configured for a PAC sees exactly
-the behavior of no proxy configuration at all. That is an explicit
-unresolved risk, not an approved transparent fallback. The operator may
-send direct traffic that bypasses a mandatory egress path such as
-egress filtering, DLP, TLS inspection, or geo and compliance controls,
-with no error, warning, or log. No user-visible signal exists today.
-Before any future PAC adoption, the implementation must provide a
-startup diagnostic or documented user-visible signal whenever a
-configured or observable PAC/system setting is refused; without that
-mitigation, adoption is blocked. This requirement does not relax the
-fail-closed rule for an unevaluable PAC.
+Refusal is total, and therefore silent today: with no system/PAC tier,
+an operator whose machine is configured for a PAC sees exactly the
+behavior of no proxy configuration at all. That is an explicit unresolved
+risk, not an approved transparent fallback. The operator may send direct
+traffic that bypasses a mandatory egress path such as egress filtering,
+DLP, TLS inspection, or geo and compliance controls, with no error,
+warning, or log. No user-visible signal exists today, so the current
+posture is not fail closed. Before any future PAC adoption, the
+implementation must provide a testable, non-lookup signal for a
+caller-supplied PAC/system source: a documented diagnostic event emitted
+before any request can send must identify the refused source, and a
+fixture must assert that event and zero direct sends. Platform lookup
+remains refused, so this record does not claim detection of ambient
+platform settings. Adoption is blocked until that criterion is
+implemented and tested; the future unevaluable-PAC path must still fail
+closed.
 
-## Fail-closed on unevaluable input
+## Required fail-closed behavior for a future PAC implementation
 
-A PAC we cannot evaluate must not become a direct-egress fallback.
-Failing open is the specific failure this record forbids: the
-operator's configuration asked for proxied egress, and silently
-sending direct traffic misrepresents what the process did.
+A PAC we cannot evaluate must not become a direct-egress fallback in a
+future implementation. Failing open is the specific failure this record
+forbids: the operator's configuration asked for proxied egress, and
+silently sending direct traffic misrepresents what the process did. The
+current explicit-unsupported refusal is silent and is not fail closed;
+this section is a pre-adoption contract, not a current behavior claim.
 
 The table is a future diagnostic contract, not current behavior —
 bitty-network has no system/PAC tier to fail in today. A future ambient
@@ -121,34 +138,42 @@ diagnostic value: `NetworkError::Offline` is currently a unit variant
 with the constant display text `network offline`, and it is already a
 catch-all for capability denial, malformed headers, an unparseable
 proxy URL, and non-timeout transport failures. It cannot by itself
-make these four cases distinguishable.
+make these four post-source cases distinguishable.
 
-| Case                           | Reason reported   |
-| ------------------------------ | ----------------- |
-| PAC file unreadable            | `unreadable`      |
-| PAC file unparseable           | `unparseable`     |
-| PAC returns no usable proxy    | `no-proxy`        |
-| PAC names a proxy needing auth | `unauthenticated` |
+| Case                                                | Reason reported       |
+| --------------------------------------------------- | --------------------- |
+| PAC file unreadable                                 | `pac-unreadable`      |
+| PAC file unparseable                                | `pac-unparseable`     |
+| PAC returns no usable proxy                         | `pac-no-proxy`        |
+| Credential-free PAC-selected proxy returns HTTP 407 | `proxy-challenge-407` |
 
-The authenticating case additionally never retains the URL it came
-from, and the first three never get far enough to yield a route.
+A PAC result containing URL userinfo is a separate **pre-client
+rejection**, named `pac-url-userinfo`: it is rejected before client
+construction and is never retained or logged. It is not the same event
+as `proxy-challenge-407`. A credential-free PAC-selected proxy may
+return HTTP 407 only after dialing; that challenge is unknowable before
+the connection and is not an inference from the PAC result. The current
+API maps the later 407 to generic `NetworkError::Offline`; a future
+diagnostic carrier must map it separately from `pac-url-userinfo`.
 
 The requirements behind that table:
 
-- The request fails closed as a typed error, exactly as an unusable
-  explicit proxy does today — never a silent direct send, never a
+- A future unevaluable source fails closed as a typed error, exactly as
+  an unusable explicit proxy must — never a silent direct send, never a
   hang, never a retry loop.
 - A future diagnostic channel must name the reason from the table and
   the kind of source it came from, so an operator can tell "my PAC is
   broken" from "my PAC was refused by design". The reason is not a new
   public error variant, and no such variant is authorized here.
-- **Open point — diagnostic carrier:** the current four-variant public
-  taxonomy and unit `NetworkError::Offline` cannot carry four distinct
-  reasons. A separate API decision must choose a compatible carrier
-  outside that taxonomy, or explicitly amend the taxonomy in a scoped
-  task. Until that decision lands, four-way distinguishability is
-  unresolved and no implementation may claim that `NetworkError::Offline`
-  provides it.
+- **Open point — diagnostic carrier (accountable task: CTX-0022, the
+  planned PAC implementation lane for #24):** the current four-variant
+  public taxonomy and unit `NetworkError::Offline` cannot carry the four
+  post-source reasons plus the separate `pac-url-userinfo` rejection. A
+  separate API decision owned by CTX-0022 must choose a compatible
+  carrier outside that taxonomy, or explicitly amend the taxonomy in a
+  scoped task. Until that decision lands, the named cases are
+  indistinguishable through `NetworkError::Offline` and no
+  implementation may claim that it provides them.
 - No URL, path, or file content from a PAC source is retained or
   logged. A PAC URL can carry userinfo, so the rule that keeps
   credential-bearing proxy URLs out of logs applies to every string
@@ -172,24 +197,33 @@ override a configured proxy. This is an open decision for any future
 slice; no implementation may resolve it by assumption. Under the
 default deny-all capability nothing is sent at all.
 
-**PAC and credentials are orthogonal.** A PAC naming a proxy that
-requires authentication must be rejected by the same userinfo check
-required for the explicit and environment paths, before any client is
-built. That check is a pending requirement on `origin/main`, not a
-current guarantee. A PAC is never a credential source: nothing it
-returns satisfies a proxy challenge, and credential storage and
-rotation stay out of scope here (CTX-0033). A challenge a proxy raises
-anyway is an ordinary transport failure and surfaces as
-`NetworkError::Offline`.
+**PAC URL userinfo and proxy challenges are separate events.** A PAC
+result containing URL userinfo (`pac-url-userinfo`) must be rejected by
+the same one-injection userinfo check required for the explicit and
+environment paths, before any client is built. The check is absent on
+current `origin/main`; completed but unmerged CTX-0028 commit `9fc413e`
+supplies that validation for the existing paths, and a future PAC
+evaluator must call the same function. Completed but unmerged CTX-0034
+commit `f51240a` supplies the feature gate and `.no_proxy()` calls, not
+credential validation.
+
+A PAC is never a credential source: nothing it returns satisfies a proxy
+challenge, and credential storage and rotation stay out of scope here
+(CTX-0033). A credential-free PAC-selected proxy can issue HTTP 407 only
+after the request is sent. That separate `proxy-challenge-407` event is
+not predictable before dialing; the current API maps the later challenge
+to generic `NetworkError::Offline`, while a future diagnostic carrier must
+map it distinctly from `pac-url-userinfo`.
 
 ## `no_proxy()` interaction
 
 Ambient discovery must stay off, but it is not off on `origin/main`.
 
 **Current origin/main baseline.** `origin/main` contains no
-`.no_proxy()` call in `crates/`; those calls exist only in the unmerged
-CTX-0028 work. `HttpNetworkService::client_with` therefore builds
-clients with reqwest's default `auto_sys_proxy = true`. In reqwest
+`.no_proxy()` call in `crates/`. The calls are supplied by two unmerged
+lanes: completed CTX-0028 commit `9fc413e` and completed CTX-0034 commit
+`f51240a`; neither is merged. `HttpNetworkService::client_with` therefore
+builds clients with reqwest's default `auto_sys_proxy = true`. In reqwest
 0.13.5, `ClientBuilder::build` pushes `ProxyMatcher::system()` whenever
 that flag is true, and hyper-util 0.1.20's `Builder::from_system()` calls
 `from_env()` unconditionally; its `client-proxy-system` feature gates
@@ -197,8 +231,8 @@ only macOS and Windows platform lookups. Consequently, on `origin/main`,
 reqwest can silently inherit `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY`
 (including their lowercase forms) and honor `NO_PROXY`/`no_proxy`,
 with no credential check in this crate. The absent `system-proxy`
-feature does not disable environment inheritance. This
-record must not claim that exposure is closed.
+feature does not disable environment inheritance. This record must not
+claim that exposure is closed.
 
 Rules for any future system/PAC work:
 
@@ -206,19 +240,24 @@ Rules for any future system/PAC work:
   pass through one shared validation function: reject userinfo, then
   parse, then build the `reqwest::Proxy`. A PAC evaluator produces a URL
   and hands it to that function. It gets no second path, and never
-  builds a client first to validate later. That function and its
-  credential check are pending on `origin/main`, not a current control.
+  builds a client first to validate later. Current `origin/main` lacks
+  that function and its credential check; completed but unmerged CTX-0028
+  commit `9fc413e` supplies the validation for existing explicit and
+  environment paths, and a future PAC evaluator must call it.
 - **Discovery stays off.** Every client builder in a landed
   implementation must call `.no_proxy()` before adding a selected route.
-  This is a target requirement, not a description of the current
-  baseline. Reading a PAC file is reading a file; letting reqwest
-  discover a platform proxy is a different, unvalidated route. Only the
-  PAC source is ever revisited; platform discovery remains refused.
+  The calls are supplied by unmerged CTX-0028 commit `9fc413e` and
+  unmerged CTX-0034 commit `f51240a`; neither is merged. Reading a PAC
+  file is reading a file; letting reqwest discover a platform proxy is a
+  different, unvalidated route. Only the PAC source is ever revisited;
+  platform discovery remains refused.
 - **The gate is not the control.** `.no_proxy()` and the credential
   check are separate controls. The `proxy` feature decides whether tier
   2 is consulted at all; it is never a reason to re-enable discovery.
-  CTX-0034's gate wiring is related, but it does not by itself add the
-  credential check; `.no_proxy()` remains a separate required control.
+  Completed but unmerged CTX-0034 commit `f51240a` wires the gate and
+  its `.no_proxy()` calls, but it does not add the credential check;
+  completed but unmerged CTX-0028 commit `9fc413e` supplies that check
+  and the HTTP/ALL fan-out.
 - **Regression guard.** A PAC slice ships tests pinning that ambient
   environment and platform configuration cannot influence the selected
   client, and a review that finds discovery re-enabled returns a
@@ -226,11 +265,13 @@ Rules for any future system/PAC work:
 
 ## What this record does not authorize
 
-No PAC code, no platform lookup, no new dependency, and no implementation
-of the pending tier-2 gate, `.no_proxy()` call, or credential check.
-Issue #24 stays open: this is its decision half only, and the
-implementation half (fixture-proxied precedence tests for tiers 1 and 2)
-is a separate scoped task.
+No PAC code, no platform lookup, no new dependency, and no merge or
+integration of the unmerged CTX-0034 commit `f51240a` or CTX-0028 commit
+`9fc413e`. Their controls remain pending integration; this record does
+not turn either commit into a current `origin/main` guarantee. Issue #24
+stays open: this is its decision half only, and the implementation half
+(fixture-proxied precedence tests for tiers 1 and 2) is a separate scoped
+task.
 
 Revisit criteria, all required before a PAC slice may start:
 
@@ -238,15 +279,18 @@ Revisit criteria, all required before a PAC slice may start:
    and `#![forbid(unsafe_code)]` analysis of its tree.
 2. A security-corpus review of executing an ambient, operator-supplied
    program on every connection decision.
-3. A separate API decision resolving the diagnostic carrier for the
-   four PAC failure reasons without silently changing the pinned
-   four-variant public taxonomy.
-4. Recorded decisions for the authority of a future `DIRECT` result
-   and for PAC sources of authentication. Neither is resolved above;
-   no PAC path exists today.
-5. A startup diagnostic or documented user-visible signal for a
-   configured or observable PAC/system setting that is refused, so the
-   direct-egress bypass hazard is not silent.
+3. A separate API decision owned by CTX-0022, the planned PAC
+   implementation lane for #24, resolving the diagnostic carrier for the
+   four post-source reasons plus `pac-url-userinfo` without silently
+   changing the pinned four-variant public taxonomy.
+4. Recorded decisions for the authority of a future `DIRECT` result and
+   for the distinct PAC URL-userinfo rejection and post-dial HTTP 407
+   challenge. Neither is resolved above; no PAC path exists today.
+5. A testable, non-lookup diagnostic event for a caller-supplied
+   PAC/system source that is refused: the event must identify the source
+   before any request can send, and a fixture must assert the event and
+   zero direct sends. Platform lookup remains refused, and no detection
+   of ambient platform settings is claimed.
 6. The one-injection-point and regression-guard rules above built into
    the slice's acceptance, not left to review.
 
