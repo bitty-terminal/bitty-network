@@ -45,10 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- CTX-0027 closes the second-round WebSocket deadline and proxy-safety gaps:
-  receive operations now bound automatic control replies, DNS uses a bounded
-  cancellable worker pool, and proxy credentials are rejected before service
-  state is built or exposed through `Debug`.
+- CTX-0028 closes the third-round WebSocket deadline and proxy-safety gaps:
+  receive operations install one temporary read/write deadline for automatic
+  control replies, DNS uses bounded elastic permits so caller deadlines return
+  while timed-out OS lookups release permits when the OS returns (exhaustion
+  surfaces `NetworkError::Timeout`), and every reqwest client disables ambient
+  system-proxy discovery. Standard proxy environment variables are checked
+  explicitly; credentialed values are rejected before a reqwest client or
+  retained proxy state is built and never reach service errors, process output,
+  or `Debug`.
 - Capability-first enforcement is the trust boundary: no ambient network
   access exists anywhere in the crate graph; the default `bitty` binary stays
   network-free and this runtime enters only when a network-capable consumer

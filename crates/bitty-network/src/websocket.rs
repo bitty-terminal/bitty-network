@@ -1,6 +1,6 @@
 //! Capability-gated WebSocket transport over a single sync stack.
 //!
-//! [`connect`] performs one handshake through tungstenite (the only
+//! `connect` performs one handshake through tungstenite (the only
 //! WebSocket dependency) and returns the open [`WebSocketSocket`]. The
 //! handshake path, in order:
 //!
@@ -29,15 +29,16 @@
 //!
 //! Timeouts: [`DEFAULT_WEBSOCKET_TIMEOUT`] bounds DNS, TCP, proxy
 //! `CONNECT`, and the WebSocket handshake unless the caller overrides it per
-//! request via [`WebSocketRequest::with_timeout`]. Each
-//! [`WebSocketSocket::recv_with_timeout`] call carries one absolute read
-//! deadline, writes keep the socket's write deadline
-//! ([`DEFAULT_WEBSOCKET_TIMEOUT`] unless a test narrows it), and
-//! [`WebSocketSocket::close`] is bounded by
-//! [`DEFAULT_WS_CLOSE_TIMEOUT`]. Deadlines live on the socket: a receive
-//! re-applies the stored write deadline instead of clearing it, so a later
-//! send or close after any number of receives stays bounded. Expired
-//! deadlines always surface [`NetworkError::Timeout`].
+//! request via [`WebSocketRequest::with_timeout`]. DNS work uses a bounded
+//! elastic permit pool: the caller always returns at its deadline, a timed-out
+//! OS lookup may retain its permit until the OS returns, and permit exhaustion
+//! surfaces [`NetworkError::Timeout`]. Each
+//! [`WebSocketSocket::recv_with_timeout`] call temporarily installs one
+//! absolute read/write deadline, covering automatic control-frame replies,
+//! then restores the stored send deadline
+//! ([`DEFAULT_WEBSOCKET_TIMEOUT`]) and close deadline
+//! ([`DEFAULT_WS_CLOSE_TIMEOUT`]).
+//! Expired deadlines always surface [`NetworkError::Timeout`].
 //!
 //! Budgets: [`MAX_WS_FRAME_BYTES`] caps one frame payload,
 //! [`MAX_WS_MESSAGE_BYTES`] caps one assembled message (fragmented or not),
@@ -68,8 +69,8 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use bitty_network_api::{NetworkError, WebSocketRequest};
@@ -164,14 +165,45 @@ const MAX_WS_HANDSHAKE_HEAD: usize = 65_536;
 /// Maximum number of addresses retained from one DNS answer.
 const MAX_DNS_ADDRS: usize = 16;
 
-/// Polling interval used while waiting for a bounded DNS worker.
+/// Polling interval used while waiting for a bounded DNS result.
 const DNS_WAIT_POLL: Duration = Duration::from_millis(1);
 
-const DNS_WORKER_COUNT: usize = 4;
-const DNS_JOB_CAPACITY: usize = 32;
+const DNS_RESOLVER_CAPACITY: usize = 32;
+#[cfg(test)]
+const HUNG_RESOLVER_COUNT: usize = 4;
 
 type ResolverResult = std::io::Result<Vec<SocketAddr>>;
 type Resolver = Box<dyn FnOnce() -> ResolverResult + Send + 'static>;
+
+static DNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct ResolverPermit;
+
+impl ResolverPermit {
+    fn acquire(after: Duration) -> Result<Self, NetworkError> {
+        let mut current = DNS_IN_FLIGHT.load(Ordering::Acquire);
+        loop {
+            if current >= DNS_RESOLVER_CAPACITY {
+                return Err(NetworkError::Timeout { after });
+            }
+            match DNS_IN_FLIGHT.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for ResolverPermit {
+    fn drop(&mut self) {
+        DNS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 struct ResolverJob {
     resolver: Resolver,
@@ -186,35 +218,17 @@ impl ResolverJob {
         }
         let _ = self.result.send((self.resolver)());
     }
-}
 
-struct ResolverPool {
-    sender: mpsc::SyncSender<ResolverJob>,
-}
-
-impl ResolverPool {
-    fn global() -> &'static Self {
-        static POOL: OnceLock<ResolverPool> = OnceLock::new();
-        POOL.get_or_init(|| {
-            let (sender, receiver) = mpsc::sync_channel::<ResolverJob>(DNS_JOB_CAPACITY);
-            let receiver = Arc::new(Mutex::new(receiver));
-            for _ in 0..DNS_WORKER_COUNT {
-                let receiver = Arc::clone(&receiver);
-                std::thread::spawn(move || {
-                    loop {
-                        let received = match receiver.lock() {
-                            Ok(receiver) => receiver.recv(),
-                            Err(_) => break,
-                        };
-                        match received {
-                            Ok(job) => job.run(),
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-            Self { sender }
-        })
+    fn spawn(self, after: Duration) -> Result<(), NetworkError> {
+        let permit = ResolverPermit::acquire(after)?;
+        std::thread::Builder::new()
+            .name("bitty-dns".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                self.run();
+            })
+            .map(|_| ())
+            .map_err(|_| NetworkError::Offline)
     }
 }
 
@@ -639,16 +653,17 @@ type WebSocketTransport = BudgetedStream<InnerTlsStream>;
 
 /// One established WebSocket connection.
 ///
-/// Returned by [`connect`]; owns the stream until [`WebSocketSocket::close`].
+/// Returned by [`bitty_network_api::NetworkService::websocket`]; owns the stream until
+/// [`WebSocketSocket::close`].
 /// Ping/Pong control frames are answered by the stack and never surfaced:
 /// [`WebSocketSocket::recv_with_timeout`] only returns data messages.
 ///
 /// The socket carries its own deadlines (`read_timeout` for the next
 /// receive, `write_timeout` for sends, `close_timeout` for the close frame)
 /// plus frame/message counters and the lifetime delivery counter behind
-/// [`MAX_WS_AGGREGATE_BYTES`]. Every operation re-applies the stored deadlines
-/// to the stream first, so a receive never clears the write deadline a later
-/// send or close needs.
+/// [`MAX_WS_AGGREGATE_BYTES`]. A receive temporarily overrides both socket
+/// deadlines, then restores the stored values so a later send or close never
+/// loses its bound.
 pub struct WebSocketSocket {
     inner: tungstenite::WebSocket<WebSocketTransport>,
     /// Read deadline for the next receive (`None` means no bound yet).
@@ -1097,12 +1112,7 @@ where
         result: sender,
         cancelled: Arc::clone(&cancelled),
     };
-    match ResolverPool::global().sender.try_send(job) {
-        Ok(()) => {}
-        Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
-            return Err(NetworkError::Offline);
-        }
-    }
+    job.spawn(deadline)?;
     loop {
         if Instant::now() >= absolute_deadline {
             cancelled.store(true, Ordering::Release);
@@ -1514,47 +1524,59 @@ mod tests {
     /// Write deadline narrowed for stall fixtures: short enough to keep the
     /// suite fast, long enough to stay clear of loopback jitter.
     const STALL_DEADLINE: Duration = Duration::from_millis(200);
+    const CONTROL_REPLY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]
-    fn resolver_wait_does_not_create_unbounded_threads() {
-        let calls = DNS_WORKER_COUNT * 4;
+    fn resolver_saturation_preserves_capacity_for_healthy_lookup() {
+        let calls = HUNG_RESOLVER_COUNT;
         let barrier = Arc::new(std::sync::Barrier::new(calls));
         let release = Arc::new(AtomicBool::new(false));
-        let (thread_tx, thread_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
         let mut callers = Vec::with_capacity(calls);
         for _ in 0..calls {
             let barrier = Arc::clone(&barrier);
             let release = Arc::clone(&release);
-            let thread_tx = thread_tx.clone();
+            let started_tx = started_tx.clone();
             callers.push(std::thread::spawn(move || {
                 barrier.wait();
-                let result = resolve_with_deadline(SILENT_READ, Instant::now(), move || {
-                    let _ = thread_tx.send(std::thread::current().id());
+                resolve_with_deadline(SILENT_READ, Instant::now(), move || {
+                    let _ = started_tx.send(());
                     while !release.load(Ordering::Acquire) {
                         std::thread::sleep(TRICKLE_INTERVAL);
                     }
                     Ok(Vec::new())
-                });
-                assert_eq!(result, Err(NetworkError::Timeout { after: SILENT_READ }));
+                })
             }));
         }
-        drop(thread_tx);
-        for caller in callers {
-            let _ = caller.join();
-        }
-        let mut workers = Vec::new();
-        while workers.len() < calls {
-            match thread_rx.recv_timeout(OPERATION_DEADLINE_BOUND) {
-                Ok(thread_id) => {
-                    if !workers.contains(&thread_id) {
-                        workers.push(thread_id);
-                    }
-                }
-                Err(_) => break,
+        drop(started_tx);
+        let mut all_started = true;
+        for _ in 0..calls {
+            if started_rx.recv_timeout(OPERATION_DEADLINE_BOUND).is_err() {
+                all_started = false;
+                break;
             }
         }
+        let caller_results = callers
+            .into_iter()
+            .map(|caller| caller.join().unwrap_or(Err(NetworkError::Offline)))
+            .collect::<Vec<_>>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("healthy address");
+        let healthy = listener.local_addr().expect("healthy address");
+        let healthy_result =
+            resolve_with_deadline(Duration::from_secs(1), Instant::now(), move || {
+                Ok(vec![healthy])
+            });
         release.store(true, Ordering::Release);
-        assert!(workers.len() <= DNS_WORKER_COUNT);
+        assert!(
+            all_started,
+            "hung resolvers did not occupy the original pool"
+        );
+        assert!(
+            caller_results
+                .iter()
+                .all(|result| { *result == Err(NetworkError::Timeout { after: SILENT_READ }) })
+        );
+        assert_eq!(healthy_result, Ok(vec![healthy]));
     }
 
     /// Read deadline for silent-peer fixtures.
@@ -1860,7 +1882,10 @@ mod tests {
         }
     }
 
-    fn spawn_stall_ping_server(signal: Arc<AtomicBool>) -> FixtureProcess {
+    fn spawn_stall_ping_server(
+        signal: Arc<AtomicBool>,
+        pinged: mpsc::Sender<()>,
+    ) -> FixtureProcess {
         let (listener, port) = bind_loopback();
         listener
             .set_nonblocking(true)
@@ -1887,7 +1912,9 @@ mod tests {
                         }
                         if !thread_stop.load(Ordering::SeqCst) {
                             let ping = encode_server_frame(true, OPCODE_PING, b"p");
-                            let _ = raw.write_all(&ping);
+                            if raw.write_all(&ping).is_ok() {
+                                let _ = pinged.send(());
+                            }
                         }
                         while !thread_stop.load(Ordering::SeqCst) {
                             std::thread::sleep(TRICKLE_INTERVAL);
@@ -2377,23 +2404,37 @@ mod tests {
     #[test]
     fn recv_deadline_covers_stalled_control_reply() {
         let signal = Arc::new(AtomicBool::new(false));
-        let mut server = spawn_stall_ping_server(Arc::clone(&signal));
+        let (pinged_tx, pinged_rx) = mpsc::channel();
+        let mut server = spawn_stall_ping_server(Arc::clone(&signal), pinged_tx);
         let mut socket = connect_loopback(server.port);
         socket.write_timeout = STALL_DEADLINE;
-        let chunk = WsMessage::Binary(vec![0xC3u8; MAX_WS_MESSAGE_BYTES]);
-        let mut write_blocked = false;
-        for _ in 0..4 {
+        let chunk = WsMessage::Binary(vec![0xC3u8; ONE_MIB_CHUNK]);
+        let mut write_full = None;
+        for _ in 0..(MAX_WS_WRITE_BUFFER_BYTES / ONE_MIB_CHUNK + 8) {
             match socket.send(chunk.clone()) {
                 Ok(()) => {}
-                Err(NetworkError::Timeout { .. }) => {
-                    write_blocked = true;
+                Err(NetworkError::Timeout { .. }) => {}
+                Err(error @ NetworkError::Budget { .. }) => {
+                    write_full = Some(error);
                     break;
                 }
                 Err(error) => panic!("unexpected stalled-write error: {error:?}"),
             }
         }
-        assert!(write_blocked, "test did not fill the write path");
+        assert_eq!(
+            write_full,
+            Some(NetworkError::Budget {
+                limit_bytes: MAX_WS_WRITE_BUFFER_BYTES as u64,
+            })
+        );
+        socket.write_timeout = CONTROL_REPLY_WRITE_TIMEOUT;
+        socket
+            .apply_deadlines()
+            .expect("long control-reply write deadline");
         signal.store(true, Ordering::Release);
+        pinged_rx
+            .recv_timeout(OPERATION_DEADLINE_BOUND)
+            .expect("stalled control frame reached the client");
         let started = Instant::now();
         assert_eq!(
             socket.recv_with_timeout(SILENT_READ),

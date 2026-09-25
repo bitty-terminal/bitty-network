@@ -23,18 +23,19 @@
 //!    so it reports unreachable. A richer transport taxonomy is follow-up
 //!    scope.
 //!
-//! Proxy: inherited from the environment, never from code. `HTTPS_PROXY` (or
-//! lowercase `https_proxy`) names the proxy; `NO_PROXY` (or lowercase
-//! `no_proxy`) lists bypassed hosts (exact match, case-insensitive; a
-//! leading-dot entry matches subdomains; `*` bypasses everything). With no
-//! proxy configured the backend sends directly — proxy-off default. A
+//! Proxy: [`HttpNetworkService::with_proxy`] is the deterministic override.
+//! Otherwise standard proxy variables are snapshotted explicitly:
+//! `HTTP_PROXY` applies to `http`/`ws`, `HTTPS_PROXY` to `https`/`wss`, and
+//! `ALL_PROXY` is the fallback (uppercase names precede lowercase).
+//! `NO_PROXY`/`no_proxy` lists bypassed hosts (exact match, case-insensitive;
+//! a leading-dot entry matches subdomains; `*` bypasses everything).
+//! Reqwest's ambient system/PAC discovery is disabled on every client, so
+//! no unselected variable or platform proxy can bypass this decision. Any
 //! configured proxy that cannot be parsed or carries userinfo is rejected
 //! before a client is built: [`HttpNetworkService::with_proxy`] returns
 //! [`NetworkError::Offline`], while environment configuration makes the
 //! service fail closed for every request instead of silently switching to
-//! direct egress. Credential-bearing URLs are never retained or logged. Use
-//! [`HttpNetworkService::with_proxy`] to pin an explicit proxy URL instead
-//! (deterministic override for tests and operators).
+//! direct egress. Credential-bearing URLs are never retained or logged.
 //!
 //! Timeouts: [`DEFAULT_REQUEST_TIMEOUT`] bounds every request unless the
 //! caller overrides it per request. An expired deadline always surfaces
@@ -106,8 +107,14 @@ use crate::offline::OfflineSocket;
 /// [`Request::with_timeout`]: bitty_network_api::Request::with_timeout
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Environment variables naming the HTTPS proxy, in precedence order.
+/// Environment variables naming HTTP proxies, in precedence order.
+const HTTP_PROXY_VARS: [&str; 2] = ["HTTP_PROXY", "http_proxy"];
+
+/// Environment variables naming HTTPS proxies, in precedence order.
 const HTTPS_PROXY_VARS: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
+
+/// Environment variables naming fallback proxies, in precedence order.
+const ALL_PROXY_VARS: [&str; 2] = ["ALL_PROXY", "all_proxy"];
 
 /// Environment variables listing proxy-bypassed hosts, in precedence order.
 ///
@@ -134,22 +141,87 @@ impl std::fmt::Debug for HttpNetworkService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpNetworkService")
             .field("capability", &self.capability)
-            .field("proxy_configured", &self.egress.via_proxy.is_some())
+            .field("proxy_configured", &self.egress.route.configured())
             .field("proxy_rejected", &self.egress.proxy_rejected)
             .finish_non_exhaustive()
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProxyScope {
+    All,
+    Http,
+    Https,
+}
+
+#[derive(Clone, Default)]
+struct ProxyRoute {
+    http: Option<String>,
+    https: Option<String>,
+    all: Option<String>,
+    client: Option<reqwest::blocking::Client>,
+}
+
+impl ProxyRoute {
+    fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {
+        let all = validated_proxy_url(proxy_url, ProxyScope::All)?;
+        let route = Self {
+            all: Some(all),
+            ..Self::default()
+        };
+        let client = proxy_route_client(&route).ok_or(NetworkError::Offline)?;
+        Ok(Self {
+            client: Some(client),
+            ..route
+        })
+    }
+
+    fn from_env() -> Result<Self, NetworkError> {
+        let http = proxy_from_env(&HTTP_PROXY_VARS)
+            .map(|url| validated_proxy_url(&url, ProxyScope::Http))
+            .transpose()?;
+        let https = proxy_from_env(&HTTPS_PROXY_VARS)
+            .map(|url| validated_proxy_url(&url, ProxyScope::Https))
+            .transpose()?;
+        let all = proxy_from_env(&ALL_PROXY_VARS)
+            .map(|url| validated_proxy_url(&url, ProxyScope::All))
+            .transpose()?;
+        let route = Self {
+            http,
+            https,
+            all,
+            client: None,
+        };
+        let client = if route.configured() {
+            Some(proxy_route_client(&route).ok_or(NetworkError::Offline)?)
+        } else {
+            None
+        };
+        Ok(Self { client, ..route })
+    }
+
+    fn configured(&self) -> bool {
+        self.http.is_some() || self.https.is_some() || self.all.is_some()
+    }
+
+    fn for_url(&self, url: &str) -> Option<&str> {
+        if url_uses_tls(url) {
+            self.https.as_deref().or(self.all.as_deref())
+        } else {
+            self.http.as_deref().or(self.all.as_deref())
+        }
+    }
+}
+
 /// Egress clients behind one service: direct always, proxied when configured.
 ///
-/// The proxy URL and bypass list are snapshotted at construction so the
-/// per-request decision is a pure function of the request host (see
+/// The proxy URLs and bypass list are snapshotted at construction so the
+/// per-request decision is a pure function of the request URL and host (see
 /// [`select_proxy`]).
 #[derive(Clone)]
 struct Egress {
-    direct: reqwest::blocking::Client,
-    via_proxy: Option<reqwest::blocking::Client>,
-    https_proxy: Option<String>,
+    direct: Option<reqwest::blocking::Client>,
+    route: ProxyRoute,
     no_proxy: String,
     proxy_rejected: bool,
 }
@@ -157,34 +229,31 @@ struct Egress {
 impl HttpNetworkService {
     /// Serve HTTP under `capability`, proxy inherited from the environment.
     ///
-    /// Reads `HTTPS_PROXY`/`https_proxy` and `NO_PROXY`/`no_proxy` once; an
+    /// Reads the standard proxy variables and `NO_PROXY`/`no_proxy` once; an
     /// absent proxy means direct egress (proxy-off default), while an
     /// unusable configured proxy makes the service fail closed. Construction
     /// performs no I/O.
     #[must_use]
     pub fn new(capability: NetworkCapability) -> Self {
-        Self::from_proxy_config(capability, https_proxy_from_env(), no_proxy_from_env())
+        let no_proxy = no_proxy_from_env();
+        let (route, proxy_rejected) = match ProxyRoute::from_env() {
+            Ok(route) => (route, false),
+            Err(_) => (ProxyRoute::default(), true),
+        };
+        Self::from_egress(capability, route, no_proxy, proxy_rejected)
     }
 
-    fn from_proxy_config(
+    fn from_egress(
         capability: NetworkCapability,
-        https_proxy: Option<String>,
+        route: ProxyRoute,
         no_proxy: String,
+        proxy_rejected: bool,
     ) -> Self {
-        let (via_proxy, https_proxy, proxy_rejected) = match https_proxy {
-            Some(url) if !proxy_url_has_credentials(&url) => match proxy_client(&url) {
-                Some(client) => (Some(client), Some(url), false),
-                None => (None, None, true),
-            },
-            Some(_) => (None, None, true),
-            None => (None, None, false),
-        };
         Self {
             capability,
             egress: Egress {
                 direct: Self::client_with(None),
-                via_proxy,
-                https_proxy,
+                route,
                 no_proxy,
                 proxy_rejected,
             },
@@ -202,23 +271,8 @@ impl HttpNetworkService {
         capability: NetworkCapability,
         proxy_url: &str,
     ) -> Result<Self, NetworkError> {
-        if proxy_url_has_credentials(proxy_url) {
-            return Err(NetworkError::Offline);
-        }
-        let via_proxy = match proxy_client(proxy_url) {
-            Some(client) => client,
-            None => return Err(NetworkError::Offline),
-        };
-        Ok(Self {
-            capability,
-            egress: Egress {
-                direct: Self::client_with(None),
-                via_proxy: Some(via_proxy),
-                https_proxy: Some(proxy_url.to_owned()),
-                no_proxy: String::new(),
-                proxy_rejected: false,
-            },
-        })
+        let route = ProxyRoute::explicit(proxy_url)?;
+        Ok(Self::from_egress(capability, route, String::new(), false))
     }
 
     fn ensure_proxy_usable(&self) -> Result<(), NetworkError> {
@@ -237,39 +291,33 @@ impl HttpNetworkService {
 
     /// Build one shared client around `proxy` (`None` for direct egress).
     ///
-    /// The builder only fails on contradictory configuration, which the
-    /// single-proxy construction above cannot produce; a direct client keeps
-    /// the path infallible and fail-closed either way.
-    fn client_with(proxy: Option<reqwest::Proxy>) -> reqwest::blocking::Client {
-        let mut builder = reqwest::blocking::Client::builder();
+    /// System-proxy discovery is disabled before the checked proxy is
+    /// injected, so reqwest cannot introduce an ambient route later.
+    fn client_with(proxy: Option<reqwest::Proxy>) -> Option<reqwest::blocking::Client> {
+        let mut builder = reqwest::blocking::Client::builder().no_proxy();
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
         }
-        match builder.build() {
-            Ok(client) => client,
-            Err(_) => reqwest::blocking::Client::new(),
+        builder.build().ok()
+    }
+
+    fn client_for(&self, url: &str, host: &str) -> Option<&reqwest::blocking::Client> {
+        match self.selected_proxy(url, host) {
+            Some(_) => self.egress.route.client.as_ref(),
+            None => self.egress.direct.as_ref(),
         }
     }
 
-    /// Pick the egress client for `host`: proxied when a proxy is configured
-    /// and the host is not bypassed, direct otherwise.
-    fn client_for(&self, host: &str) -> &reqwest::blocking::Client {
-        match self.egress.via_proxy.as_ref() {
-            Some(proxied) => {
-                match select_proxy(
-                    self.egress.https_proxy.as_deref(),
-                    &self.egress.no_proxy,
-                    host,
-                ) {
-                    Some(_) => proxied,
-                    None => &self.egress.direct,
-                }
-            }
-            None => &self.egress.direct,
+    fn selected_proxy(&self, url: &str, host: &str) -> Option<&str> {
+        let proxy = self.egress.route.for_url(url)?;
+        if select_proxy(Some(proxy), &self.egress.no_proxy, host).is_some() {
+            Some(proxy)
+        } else {
+            None
         }
     }
 
-    /// The proxy URL selected for `host`, if any: the configured proxy that
+    /// The proxy URL selected for `url`, if any: the configured proxy that
     /// is not bypassed for this host. Mirrors the per-request egress choice
     /// in [`client_for`](Self::client_for) so the WebSocket handshake tunnels
     /// through exactly the proxy a plain request would use.
@@ -277,15 +325,8 @@ impl HttpNetworkService {
     /// Only available with the `websocket` feature; the handshake path in
     /// `crate::websocket` consumes it.
     #[cfg(feature = "websocket")]
-    pub(crate) fn proxy_url_for(&self, host: &str) -> Option<String> {
-        match self.egress.via_proxy.as_ref() {
-            Some(_) => select_proxy(
-                self.egress.https_proxy.as_deref(),
-                &self.egress.no_proxy,
-                host,
-            ),
-            None => None,
-        }
+    pub(crate) fn proxy_url_for(&self, url: &str, host: &str) -> Option<String> {
+        self.selected_proxy(url, host).map(str::to_owned)
     }
 
     /// Capability-first rejection for `request` (mirrors the offline backend).
@@ -312,10 +353,10 @@ impl HttpNetworkService {
             HttpMethod::Patch => reqwest::Method::PATCH,
         };
         let timeout = request.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
-        let mut outgoing = self
-            .client_for(request.host())
-            .request(method, request.url.clone())
-            .timeout(timeout);
+        let client = self
+            .client_for(&request.url, request.host())
+            .ok_or(NetworkError::Offline)?;
+        let mut outgoing = client.request(method, request.url.clone()).timeout(timeout);
         for (name, value) in &request.headers {
             let name = match HeaderName::from_bytes(name.as_bytes()) {
                 Ok(name) => name,
@@ -459,7 +500,10 @@ impl NetworkService for HttpNetworkService {
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
         self.capability.check_handshake(request)?;
         self.ensure_proxy_usable()?;
-        crate::websocket::connect(request, self.proxy_url_for(request.host()).as_deref())
+        crate::websocket::connect(
+            request,
+            self.proxy_url_for(&request.url, request.host()).as_deref(),
+        )
     }
 
     #[cfg(not(feature = "websocket"))]
@@ -477,15 +521,40 @@ fn proxy_url_has_credentials(url: &str) -> bool {
         .is_some_and(|authority| authority.contains('@'))
 }
 
-/// Build one proxied shared client for `url`, or `None` when it does not parse.
-fn proxy_client(url: &str) -> Option<reqwest::blocking::Client> {
-    match reqwest::Proxy::all(url) {
-        Ok(proxy) => reqwest::blocking::Client::builder()
-            .proxy(proxy)
-            .build()
-            .ok(),
-        Err(_) => None,
+fn validated_proxy_url(url: &str, scope: ProxyScope) -> Result<String, NetworkError> {
+    if proxy_url_has_credentials(url) || reqwest_proxy(url, scope).is_err() {
+        return Err(NetworkError::Offline);
     }
+    Ok(url.to_owned())
+}
+
+fn reqwest_proxy(url: &str, scope: ProxyScope) -> Result<reqwest::Proxy, ()> {
+    match scope {
+        ProxyScope::All => reqwest::Proxy::all(url),
+        ProxyScope::Http => reqwest::Proxy::http(url),
+        ProxyScope::Https => reqwest::Proxy::https(url),
+    }
+    .map_err(|_| ())
+}
+
+fn proxy_route_client(route: &ProxyRoute) -> Option<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder().no_proxy();
+    for (url, scope) in [
+        (route.all.as_deref(), ProxyScope::All),
+        (route.https.as_deref(), ProxyScope::Https),
+        (route.http.as_deref(), ProxyScope::Http),
+    ] {
+        if let Some(url) = url {
+            builder = builder.proxy(reqwest_proxy(url, scope).ok()?);
+        }
+    }
+    builder.build().ok()
+}
+
+fn url_uses_tls(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
+    })
 }
 
 /// Map a post-capability transport failure to its typed error.
@@ -501,12 +570,12 @@ fn classify_transport(error: &reqwest::Error, after: Duration) -> NetworkError {
     }
 }
 
-/// Proxy URL from the environment (`HTTPS_PROXY`, then `https_proxy`).
-fn https_proxy_from_env() -> Option<String> {
-    HTTPS_PROXY_VARS
-        .iter()
-        .find_map(|var| std::env::var(var).ok())
-        .filter(|value| !value.trim().is_empty())
+fn proxy_from_env(vars: &[&str]) -> Option<String> {
+    vars.iter().find_map(|var| {
+        std::env::var(var)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 /// Bypass list from the environment (`NO_PROXY` plus `no_proxy`).
@@ -520,14 +589,14 @@ fn no_proxy_from_env() -> String {
 
 /// Decide the egress proxy for `host`: pure and unit-tested.
 ///
-/// Returns `Some(url)` when `https_proxy` names a proxy and `host` is not
+/// Returns `Some(url)` when `proxy_url` names a proxy and `host` is not
 /// bypassed by `no_proxy`; `None` otherwise (proxy-off default). Matching is
 /// case-insensitive on the host: exact entries, leading-dot entries covering
 /// subdomains (`.example.com` bypasses `api.example.com` but not
 /// `example.com` itself), and `*` bypassing everything. Entries carrying a
 /// port never match a bare host — keep entries port-free.
-fn select_proxy(https_proxy: Option<&str>, no_proxy: &str, host: &str) -> Option<String> {
-    let proxy = https_proxy.filter(|url| !url.trim().is_empty())?;
+fn select_proxy(proxy_url: Option<&str>, no_proxy: &str, host: &str) -> Option<String> {
+    let proxy = proxy_url.filter(|url| !url.trim().is_empty())?;
     let host = host.trim().to_lowercase();
     if host.is_empty() {
         return None;
@@ -570,6 +639,44 @@ mod tests {
         assert_eq!(
             select_proxy(Some("http://proxy:8080"), "other.example", "example.com"),
             Some("http://proxy:8080".to_owned())
+        );
+    }
+
+    #[test]
+    fn proxy_route_prefers_scheme_specific_fallback() {
+        let route = ProxyRoute {
+            http: Some("http://http-proxy.test".to_owned()),
+            https: Some("http://https-proxy.test".to_owned()),
+            all: Some("http://all-proxy.test".to_owned()),
+            client: None,
+        };
+        assert_eq!(
+            route.for_url("http://origin.test"),
+            Some("http://http-proxy.test")
+        );
+        assert_eq!(
+            route.for_url("ws://origin.test"),
+            Some("http://http-proxy.test")
+        );
+        assert_eq!(
+            route.for_url("https://origin.test"),
+            Some("http://https-proxy.test")
+        );
+        assert_eq!(
+            route.for_url("wss://origin.test"),
+            Some("http://https-proxy.test")
+        );
+        let fallback = ProxyRoute {
+            all: route.all.clone(),
+            ..ProxyRoute::default()
+        };
+        assert_eq!(
+            fallback.for_url("http://origin.test"),
+            Some("http://all-proxy.test")
+        );
+        assert_eq!(
+            fallback.for_url("https://origin.test"),
+            Some("http://all-proxy.test")
         );
     }
 
@@ -633,25 +740,14 @@ mod tests {
     }
 
     #[test]
-    fn credentialed_proxy_fails_closed_without_debug_secret() {
+    fn explicit_credentialed_proxy_is_rejected_without_exposed_secret() {
         let secret = "fixture-pass";
         let proxy_url = format!("http://fixture-user:{secret}@proxy.test/");
-        assert_eq!(
-            HttpNetworkService::with_proxy(NetworkCapability::offline(), &proxy_url).err(),
-            Some(NetworkError::Offline)
-        );
-        let service = HttpNetworkService::from_proxy_config(
-            NetworkCapability::offline().with_domain("allowed.test"),
-            Some(proxy_url),
-            String::new(),
-        );
-        let debug = format!("{service:?}");
-        assert!(!debug.contains(secret));
-        assert!(!debug.contains("fixture-user"));
-        assert_eq!(
-            service.request(&Request::get("https://allowed.test/")),
-            Err(NetworkError::Offline)
-        );
+        let error = HttpNetworkService::with_proxy(NetworkCapability::offline(), &proxy_url)
+            .expect_err("credentialed proxy must fail closed");
+        assert_eq!(error, NetworkError::Offline);
+        assert!(!format!("{error:?}").contains(secret));
+        assert!(!format!("{error:?}").contains("fixture-user"));
     }
 
     /// Serve `body` once over loopback and return its URL.

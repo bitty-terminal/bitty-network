@@ -2,10 +2,10 @@
 //!
 //! All servers are loopback `TcpListener`s on ephemeral ports: no external
 //! network, no hardcoded ports. Coverage: plain round-trip through the
-//! shared client, loopback bypass of an environment proxy, timeout
-//! fail-closed with typed [`NetworkError::Timeout`], capability-denied
-//! requests never touching a socket, explicit-proxy routing, and
-//! fail-closed WebSocket.
+//! shared client, loopback bypass of an environment proxy, explicit ambient
+//! proxy routing and credential rejection, timeout fail-closed with typed
+//! [`NetworkError::Timeout`], capability-denied requests never touching a
+//! socket, explicit-proxy routing, and fail-closed WebSocket.
 //!
 //! [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
 
@@ -148,6 +148,78 @@ fn allow_loopback() -> HttpNetworkService {
     HttpNetworkService::new(NetworkCapability::offline().with_domain("127.0.0.1"))
 }
 
+const PROXY_CHILD_MODE: &str = "BITTY_NETWORK_PROXY_CHILD_MODE";
+const PROXY_CHILD_ORIGIN: &str = "BITTY_NETWORK_PROXY_CHILD_ORIGIN";
+const PROXY_CHILD_TEST: &str = "ambient_proxy_environment_is_explicit_and_credential_safe";
+const PROXY_ENV_VARS: [&str; 6] = [
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+const PROXY_BYPASS_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+const PROXY_USER_FIXTURE: &str = "fixture-user";
+const PROXY_PASSWORD_FIXTURE: &str = "fixture-pass";
+
+fn run_proxy_child() -> bool {
+    let Ok(mode) = std::env::var(PROXY_CHILD_MODE) else {
+        return false;
+    };
+    let origin = std::env::var(PROXY_CHILD_ORIGIN).expect("proxy child origin");
+    let service = allow_loopback();
+    match mode.as_str() {
+        "credentials" => {
+            let error = service
+                .request(&Request::get(origin))
+                .expect_err("credentialed ambient proxy must fail closed");
+            let exposed = [
+                format!("{service:?}"),
+                format!("{error}"),
+                format!("{error:?}"),
+            ];
+            assert!(
+                exposed.iter().all(|value| {
+                    !value.contains(PROXY_USER_FIXTURE) && !value.contains(PROXY_PASSWORD_FIXTURE)
+                }),
+                "credentialed proxy data reached observable output"
+            );
+        }
+        "route" => {
+            let response = service
+                .request(&Request::get(origin))
+                .expect("ambient HTTP proxy route succeeds");
+            assert_eq!(response.body, b"via-proxy");
+        }
+        _ => panic!("unknown proxy child mode"),
+    }
+    true
+}
+
+fn run_proxy_child_process(
+    mode: &str,
+    variable: &str,
+    proxy_url: &str,
+    origin_url: &str,
+) -> std::process::Output {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .arg(PROXY_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(PROXY_CHILD_MODE, mode)
+        .env(PROXY_CHILD_ORIGIN, origin_url);
+    for name in PROXY_ENV_VARS {
+        command.env_remove(name);
+    }
+    for name in PROXY_BYPASS_VARS {
+        command.env_remove(name);
+    }
+    command.env(variable, proxy_url);
+    command.output().expect("proxy child process")
+}
+
 #[test]
 fn round_trip_get_through_shared_client() {
     let probe = Probe::start(|_| ok_response(b"hello"));
@@ -192,6 +264,55 @@ fn loopback_bypasses_environment_proxy() {
 
     assert_eq!(response.body, b"direct");
     probe.stop_and_join();
+}
+
+#[test]
+fn ambient_proxy_environment_is_explicit_and_credential_safe() {
+    if run_proxy_child() {
+        return;
+    }
+
+    for variable in PROXY_ENV_VARS {
+        let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
+        let proxy = Probe::start(|_| ok_response(b"proxy-must-stay-unused"));
+        let proxy_url = format!(
+            "http://{PROXY_USER_FIXTURE}:{PROXY_PASSWORD_FIXTURE}@{}",
+            proxy.url("/").trim_start_matches("http://")
+        );
+        let output = run_proxy_child_process("credentials", variable, &proxy_url, &origin.url("/"));
+        let origin_hits = origin.hits();
+        let proxy_hits = proxy.hits();
+        origin.stop_and_join();
+        proxy.stop_and_join();
+        let captured = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "proxy credential child failed");
+        assert!(
+            !captured.contains(PROXY_USER_FIXTURE)
+                && !captured.contains(PROXY_PASSWORD_FIXTURE)
+                && !captured.contains(&proxy_url),
+            "proxy credential reached child output"
+        );
+        assert_eq!(origin_hits, 0, "rejected proxy request reached origin");
+        assert_eq!(proxy_hits, 0, "rejected proxy request reached proxy");
+    }
+
+    let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
+    let proxy = Probe::start(|_| ok_response(b"via-proxy"));
+    let output = run_proxy_child_process("route", "HTTP_PROXY", &proxy.url("/"), &origin.url("/"));
+    let origin_hits = origin.hits();
+    let proxy_hits = proxy.hits();
+    origin.stop_and_join();
+    proxy.stop_and_join();
+    assert!(output.status.success(), "ambient proxy route child failed");
+    assert_eq!(origin_hits, 0, "ambient HTTP_PROXY was silently ignored");
+    assert_eq!(
+        proxy_hits, 1,
+        "ambient HTTP_PROXY did not use the explicit route"
+    );
 }
 
 #[test]
