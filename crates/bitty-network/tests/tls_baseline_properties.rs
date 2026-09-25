@@ -12,13 +12,23 @@
 //! section relies on is pinned here as an assertion, so a change that breaks
 //! the property fails the suite instead of quietly invalidating the record.
 //! The record keeps one base pin and the rule that its current-state claims
-//! are scoped to that base; this suite is what makes a moved base loud.
+//! are scoped to that base. This suite is not what makes a moved base loud,
+//! and it does not claim to be: the pins read the working tree through
+//! `include_str!` and never observe a commit, so moving the base ref on its
+//! own, without merging it here, leaves every pin green. The two cases are
+//! the ones the record states. A base move merged here that *changes* a
+//! pinned property turns this suite red, and one that leaves every pinned
+//! property intact leaves it green. Re-verification after a base move is
+//! therefore a human obligation that no assertion in this file discharges.
 //!
 //! Two deliberate asymmetries:
 //!
 //! - Properties that name a commit are *absent by design*. What is pinned is
 //!   the behavior or manifest fact the record depends on, never the SHA that
-//!   once provided it, so a merge or rebase cannot invalidate the record.
+//!   once provided it, so a merge or rebase cannot invalidate the pins. It can
+//!   still invalidate a current-state sentence, because a sentence no pin
+//!   backs is exactly what a merge can move; that case is the obligation the
+//!   record leaves with a human, not one this suite can close.
 //! - Two properties pin a *gap* (the `proxy` gate predicate is merged but its
 //!   `HttpNetworkService::new` call-site wiring is not). Pinning a gap means
 //!   the assertion fails the day the gap closes, which is the intended
@@ -66,8 +76,10 @@ const API_SOURCE: &str = include_str!("../../bitty-network-api/src/lib.rs");
 ///
 /// - **Over-stripping** can only remove text, so it can turn a `require` into a
 ///   failure and a `forbid` into a silent pass. It needs a line that opens with
-///   a string or char literal whose contents begin `//` or `/*`. No line in any
-///   of the four sources scanned below is shaped like that.
+///   a string or char literal whose contents begin `//` or `/*`, or a
+///   continuation line inside a multi-line string literal that itself begins
+///   with one of those. No line in any of the four sources scanned below is
+///   shaped like that.
 /// - **Under-stripping** keeps a `//` comment that trails code on its line.
 ///   Nothing is hidden by that, but something can be faked: a trailing comment
 ///   quoting a needle verbatim, or carrying a `#[derive(`, would satisfy a
@@ -137,6 +149,15 @@ fn lock_package<'a>(lock: &'a str, name: &str) -> Option<&'a str> {
 /// apply to. `#[non_exhaustive]` on the failure taxonomy is the load-bearing
 /// one: a window starting at `pub enum NetworkError` could not see it, which
 /// would leave that assertion permanently green and therefore worthless.
+///
+/// The run therefore only reaches an attribute that stays contiguous with the
+/// item, and the formatter does not guarantee that: `rustfmt` keeps a blank
+/// line or a comment between an attribute and the item it applies to, and
+/// either one ends [`attribute_run_start`]'s run. That would put the attribute
+/// outside the window and turn the `non_exhaustive` pin green on a taxonomy
+/// that is no longer closed, so the pin holds for the shapes rustfmt emits
+/// today and a source that separates the two must have this helper taught
+/// about it before that pin can be trusted.
 fn function_body(source: &str, header: &str) -> String {
     let stripped = code_only(source);
     let header_at = stripped.find(header).unwrap_or_else(|| {
@@ -193,8 +214,13 @@ fn attribute_run_start(source: &str, offset: usize) -> usize {
 /// )]
 /// ```
 ///
-/// Scanning line by line would skip a wrapped list whole, which is the one way
-/// this check could miss a forbidden trait.
+/// Scanning line by line would skip a wrapped list whole, which is one of the
+/// two ways this check can miss a forbidden trait. The other is the `break`
+/// below: a `#[derive(` with no closing paren anywhere after it abandons the
+/// rest of the file, so every later list goes unread. That path fails open and
+/// silently rather than loudly, so a source that grows an unterminated
+/// `#[derive(` must have this helper taught about it before the pin it feeds
+/// can be trusted.
 fn derived_traits(source: &str) -> Vec<(usize, String)> {
     const OPEN: &str = "#[derive(";
     let stripped = code_only(source);
@@ -519,7 +545,7 @@ fn failures_are_typed_with_stable_exhaustive_categories() {
         &declaration,
         "non_exhaustive",
         "the failure taxonomy is not open-ended for downstream consumers: no attribute \
-         on it, in any spelling, marks it `non_exhaustive`",
+         contiguous with it, in any spelling, marks it `non_exhaustive`",
     );
 }
 
