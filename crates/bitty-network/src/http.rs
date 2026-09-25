@@ -231,6 +231,7 @@ impl std::fmt::Debug for HttpNetworkService {
             .field("capability", &self.capability)
             .field("proxy_configured", &self.egress.route.configured())
             .field("proxy_rejected", &self.egress.proxy_rejected)
+            .field("deny_all", &self.egress.deny_all)
             .field("tls", &self.provider)
             .finish_non_exhaustive()
     }
@@ -323,6 +324,16 @@ struct Egress {
     route: ProxyRoute,
     no_proxy: String,
     proxy_rejected: bool,
+    /// This service holds no client at all and refuses every request.
+    ///
+    /// Set only by [`HttpNetworkService::offline`], the deny-all construction of
+    /// last resort. It is here so the fallback is *observable* rather than
+    /// silent: `new` cannot return a `Result`, so a construction failure has
+    /// nowhere else to go, and a service that quietly answers every request with
+    /// `Offline` looks exactly like one built during an outage. The flag carries
+    /// no cause and no payload — only that the fallback happened — so it cannot
+    /// leak anything through the redacting `Debug`.
+    deny_all: bool,
 }
 
 impl Egress {
@@ -366,6 +377,7 @@ impl Egress {
             route: route.clone(),
             no_proxy: String::new(),
             proxy_rejected: false,
+            deny_all: false,
         })
     }
 }
@@ -386,9 +398,21 @@ impl HttpNetworkService {
         // The default policy builds no client that can fail, so this cannot
         // fail; the fallback exists so the infallible signature stays honest
         // rather than panicking if that ever changes.
+        //
+        // The failure is **not** silently dropped. `new` has no `Result` to
+        // return it through, so a swallow here would leave a service that
+        // answers every request with `Offline` and no way to tell it apart from
+        // one built during an outage. Two things make it visible instead: the
+        // fallback service records `deny_all`, which the redacting `Debug`
+        // reports, and the cause is bound rather than discarded so a future
+        // change that makes this arm reachable has to decide what to do with it
+        // instead of inheriting a bare `_`.
+        //
+        // Failing closed is the right call: the alternative is a service that
+        // looks usable and is not.
         match Self::with_provider(capability.clone(), TlsProvider::native_only()) {
             Ok(service) => service,
-            Err(_) => Self::offline(capability),
+            Err(cause) => Self::offline(capability, cause),
         }
     }
 
@@ -428,7 +452,22 @@ impl HttpNetworkService {
 
     /// Deny-all construction of last resort, used only when a client cannot be
     /// built: it keeps the service fail-closed instead of leaving a hole.
-    fn offline(capability: NetworkCapability) -> Self {
+    ///
+    /// `cause` names the decision at the construction site instead of being
+    /// discarded into `_`, so a caller that swallows a construction error is
+    /// visibly naming it. It is a [`NetworkError`] category and is **not
+    /// stored**: what the service reports is the single `deny_all` flag, so
+    /// neither the cause nor anything it could carry reaches `Debug` or a
+    /// request error. The binding is kept deliberately — a build in which this
+    /// arm is unreachable still has to show what the arm does with a real
+    /// error, and a change that wants the cause in `Debug` has to widen the
+    /// redaction review to get it.
+    #[allow(
+        unused_variables,
+        reason = "the cause names the decision; it is deliberately not stored"
+    )]
+    fn offline(capability: NetworkCapability, cause: NetworkError) -> Self {
+        let _ = cause;
         Self {
             capability,
             provider: TlsProvider::native_only(),
@@ -438,6 +477,7 @@ impl HttpNetworkService {
                 route: ProxyRoute::default(),
                 no_proxy: String::new(),
                 proxy_rejected: true,
+                deny_all: true,
             },
         }
     }
@@ -616,12 +656,19 @@ impl HttpNetworkService {
         // per slot. It is still a typed refusal rather than a fallback, because
         // falling back to another slot's client would present a client
         // certificate this destination never selected.
+        //
+        // The category is `Offline`, not a `Tls` failure. The slot is empty
+        // because the service holds no client to select from — the deny-all
+        // `offline` construction — so there is no trust or identity decision to
+        // report and nothing is wrong with any identity. `Tls` here would name
+        // a client-identity problem an operator would then go looking for in
+        // their policy, in a policy that is fine. `Offline` is the category this
+        // service already uses for "no egress", on the `proxy_rejected` path and
+        // at the redirect limit, so all three deny-all routes now agree.
         clients
             .get(selection.slot())
             .and_then(Option::as_ref)
-            .ok_or(NetworkError::Tls {
-                reason: bitty_network_api::TlsFailure::IdentityInvalid,
-            })
+            .ok_or(NetworkError::Offline)
     }
 
     fn selected_proxy(&self, url: &str, host: &str) -> Option<&str> {

@@ -955,6 +955,245 @@ mod tests {
         )
     }
 
+    /// One DER triple, with the length computed rather than hand-counted.
+    ///
+    /// The hand-built fixtures below are only trustworthy if their lengths are
+    /// right, and a miscounted length fails as `Malformed` for the wrong reason
+    /// — which would make a negative test pass without testing anything. Every
+    /// length in these fixtures is therefore derived from the contents.
+    fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+        assert!(
+            contents.len() < 0x80,
+            "these fixtures stay in the short-form length range"
+        );
+        let mut out = vec![tag, contents.len() as u8];
+        out.extend_from_slice(contents);
+        out
+    }
+
+    /// A `Name` (`RDNSequence`) holding exactly one RDN with one attribute.
+    fn name(oid: &[u8], value: &[u8]) -> Vec<u8> {
+        let attribute = tlv(
+            TAG_SEQUENCE,
+            &[tlv(TAG_OID, oid), tlv(TAG_OCTET_STRING, value)].concat(),
+        );
+        tlv(TAG_SEQUENCE, &tlv(TAG_SET, &attribute))
+    }
+
+    /// Walk `bytes` as a `Name`, for the strictness cases below.
+    fn walk_name(bytes: &[u8]) -> Result<(), RootRejection> {
+        let mut reader = Der::read(bytes);
+        skip_name(&mut reader)
+    }
+
+    /// An OID that is legal to carry in a name; the tests vary the *structure*
+    /// around it rather than the identifier itself.
+    const NAME_OID: &[u8] = &[0x2a, 0x03, 0x04];
+
+    /// `basicConstraints` must *say* `CA=TRUE`, and every other conforming
+    /// encoding of the same field says it does not.
+    ///
+    /// The case the primary `a_root_must_declare_itself_a_ca` pin cannot reach
+    /// is the empty `SEQUENCE`. DER encodes a defaulted `cA` by *omitting* it,
+    /// so `basicConstraints` with no members at all is a conforming way to say
+    /// `CA=FALSE` — the same claim as an explicit `BOOLEAN FALSE`, reached
+    /// through a different arm of the reader. Both must answer "not a CA", and
+    /// neither may be mistaken for the absent-extension case, which is a
+    /// different refusal reason.
+    ///
+    /// The `pathLenConstraint`-only form is here for the same reason: it also
+    /// leaves `cA` at its default while being a non-empty `SEQUENCE`.
+    #[test]
+    fn basic_constraints_reads_every_non_true_encoding_as_not_a_ca() {
+        // `SEQUENCE {}` — `cA` omitted, left at its DEFAULT FALSE.
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SEQUENCE, &[])),
+            Ok(false),
+            "an empty basicConstraints is a conforming CA=FALSE and must not read as a CA"
+        );
+        // `SEQUENCE { BOOLEAN FALSE }` — the explicit spelling of the same claim.
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SEQUENCE, &tlv(TAG_BOOLEAN, &[0x00]))),
+            Ok(false)
+        );
+        // `SEQUENCE { pathLenConstraint INTEGER }` with `cA` still defaulted.
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SEQUENCE, &tlv(TAG_INTEGER, &[0x01]))),
+            Ok(false)
+        );
+        // `SEQUENCE { BOOLEAN TRUE, pathLenConstraint INTEGER }` is the only
+        // form that reads as a CA, so the negatives above are not vacuous.
+        assert_eq!(
+            read_basic_constraints(&tlv(
+                TAG_SEQUENCE,
+                &[tlv(TAG_BOOLEAN, &[0xff]), tlv(TAG_INTEGER, &[0x01])].concat()
+            )),
+            Ok(true)
+        );
+        // Not a `SEQUENCE` at all, and a `SEQUENCE` with a field this reader
+        // does not know: both malformed, never silently "not a CA".
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SET, &tlv(TAG_BOOLEAN, &[0xff]))),
+            Err(RootRejection::Malformed)
+        );
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SEQUENCE, &tlv(TAG_OCTET_STRING, &[0x00]))),
+            Err(RootRejection::Malformed)
+        );
+        // Trailing bytes after the `SEQUENCE`: a value that is not exactly one
+        // element, which is the shape a hostile bundle uses to append a second
+        // object past a reader that stops at the first.
+        let mut trailing = tlv(TAG_SEQUENCE, &tlv(TAG_BOOLEAN, &[0xff]));
+        trailing.extend_from_slice(&tlv(TAG_BOOLEAN, &[0xff]));
+        assert_eq!(
+            read_basic_constraints(&trailing),
+            Err(RootRejection::Malformed)
+        );
+        // A non-minimal boolean encoding: DER admits TRUE as exactly `0xff`.
+        assert_eq!(
+            read_basic_constraints(&tlv(TAG_SEQUENCE, &tlv(TAG_BOOLEAN, &[0x01]))),
+            Err(RootRejection::Malformed)
+        );
+    }
+
+    /// `keyCertSign` is bit 5, so a bit string too short to *hold* bit 5 cannot
+    /// assert it. The boundary is pinned from both sides: a string ending one
+    /// bit short must not report the usage, and one bit longer must.
+    ///
+    /// A set bit in the DER padding is malformed rather than a usage, so a
+    /// string that would otherwise answer "yes" by reading padding is refused
+    /// instead.
+    #[test]
+    fn key_usage_needs_a_long_enough_bit_string_and_zero_padding() {
+        // BIT STRING contents are `<unused-bits> <octets...>`.
+        let bit_string = |unused: u8, octets: &[u8]| {
+            let mut contents = vec![unused];
+            contents.extend_from_slice(octets);
+            tlv(TAG_BIT_STRING, &contents)
+        };
+
+        // Five significant bits: the highest numbered bit is 4, so bit 5 is not
+        // present and the answer is "no".
+        assert_eq!(read_key_usage(&bit_string(3, &[0x00])), Ok(false));
+        // Six significant bits: bit 5 is the last one, and it is set.
+        assert_eq!(read_key_usage(&bit_string(2, &[0b0000_0100])), Ok(true));
+        // The same length with the bit clear.
+        assert_eq!(read_key_usage(&bit_string(2, &[0b0000_0000])), Ok(false));
+        // Only a padding octet: no significant bits at all.
+        assert_eq!(read_key_usage(&bit_string(7, &[0x00])), Ok(false));
+        // No octets: holds no bits, so it permits nothing.
+        assert_eq!(read_key_usage(&bit_string(0, &[])), Ok(false));
+        // A set bit in the padding of an otherwise-answering string is malformed
+        // rather than a usage: two readers could disagree about the same bytes.
+        assert_eq!(
+            read_key_usage(&bit_string(3, &[0b0000_0100])),
+            Err(RootRejection::Malformed)
+        );
+        // More than seven unused bits, and a value that is not a BIT STRING.
+        assert_eq!(
+            read_key_usage(&bit_string(8, &[0x00])),
+            Err(RootRejection::Malformed)
+        );
+        assert_eq!(
+            read_key_usage(&tlv(TAG_OCTET_STRING, &[0x04])),
+            Err(RootRejection::Malformed)
+        );
+    }
+
+    /// A `Name` is walked to its last octet, and every level of the walk is
+    /// strict.
+    ///
+    /// The walk is three deep — `RDNSequence` → `SET` → `SEQUENCE { OID, value }`
+    /// — and each level can be wrong in a way the levels above cannot detect. A
+    /// reader that stopped early, or that trusted a length, would accept a name
+    /// no conforming verifier can match against, which is exactly the anchor
+    /// this module is supposed to refuse. Each negative below breaks one level,
+    /// and the positives show the walk is not refusing everything.
+    #[test]
+    fn a_name_is_walked_to_its_last_octet_or_refused() {
+        // Well-formed: one RDN, one attribute, OID plus a value of any tag.
+        assert_eq!(walk_name(&name(NAME_OID, b"anchor")), Ok(()));
+        // An empty RDNSequence is a legal (if useless) name: nothing to walk,
+        // nothing malformed.
+        assert_eq!(walk_name(&tlv(TAG_SEQUENCE, &[])), Ok(()));
+        // Two attributes in one RDN, and two RDNs, both walk.
+        let two_attributes = tlv(
+            TAG_SET,
+            &[
+                tlv(
+                    TAG_SEQUENCE,
+                    &[tlv(TAG_OID, NAME_OID), tlv(TAG_OCTET_STRING, b"a")].concat(),
+                ),
+                tlv(
+                    TAG_SEQUENCE,
+                    &[tlv(TAG_OID, NAME_OID), tlv(TAG_OCTET_STRING, b"b")].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            walk_name(&tlv(TAG_SEQUENCE, &two_attributes)),
+            Ok(()),
+            "a multi-valued RDN is legal and must still be walked"
+        );
+
+        for (bytes, why) in [
+            (tlv(TAG_SET, &[]), "the RDNSequence is not a SEQUENCE"),
+            (
+                tlv(TAG_SEQUENCE, &tlv(TAG_OCTET_STRING, b"")),
+                "an RDN is not a SET",
+            ),
+            (
+                tlv(TAG_SEQUENCE, &tlv(TAG_SET, &tlv(TAG_OCTET_STRING, b""))),
+                "an attribute is not a SEQUENCE",
+            ),
+            (
+                tlv(
+                    TAG_SEQUENCE,
+                    &tlv(TAG_SET, &tlv(TAG_SEQUENCE, &tlv(TAG_OCTET_STRING, b""))),
+                ),
+                "an attribute does not start with an OID",
+            ),
+            (
+                // A third element after the OID and the value: the walk must
+                // consume the attribute, not stop once it has what it needs.
+                tlv(
+                    TAG_SEQUENCE,
+                    &tlv(
+                        TAG_SET,
+                        &tlv(
+                            TAG_SEQUENCE,
+                            &[
+                                tlv(TAG_OID, NAME_OID),
+                                tlv(TAG_OCTET_STRING, b"a"),
+                                tlv(TAG_OCTET_STRING, b"b"),
+                            ]
+                            .concat(),
+                        ),
+                    ),
+                ),
+                "an attribute carries a third element",
+            ),
+            (
+                // A value whose declared length runs past the attribute.
+                tlv(
+                    TAG_SEQUENCE,
+                    &tlv(
+                        TAG_SET,
+                        &[tlv(TAG_OID, NAME_OID), vec![TAG_OCTET_STRING, 0x05]].concat(),
+                    ),
+                ),
+                "an attribute value is truncated",
+            ),
+        ] {
+            assert_eq!(
+                walk_name(&bytes),
+                Err(RootRejection::Malformed),
+                "{why} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn a_ca_certificate_is_admitted_with_its_window() {
         let admitted =
@@ -1108,6 +1347,39 @@ mod tests {
                 let _ = admit_root(&corrupted);
             }
         }
+    }
+
+    /// A DER length is read at exactly one width, or not at all.
+    ///
+    /// A long-form length with a leading zero byte is a second spelling of a
+    /// short-form length. Accepting it means the same certificate has two
+    /// encodings and two readers can disagree about where a value ends, which is
+    /// the shape a hostile bundle uses to smuggle a second object past a lenient
+    /// reader. So the non-minimal form is refused, as are the indefinite form and
+    /// a long form wider than a `usize`.
+    #[test]
+    fn a_length_is_read_at_one_width_or_not_at_all() {
+        // `read_length` takes the bytes after the tag, so the first byte here is
+        // the length octet and the rest is the value.
+        let short = [0x03u8, b'a', b'b', b'c'];
+        assert_eq!(read_length(&short), Some((3, &short[1..])));
+        // The equivalent minimal long form reads the same.
+        let long = [0x81u8, 0x03, b'a', b'b', b'c'];
+        assert_eq!(read_length(&long), Some((3, &long[2..])));
+        // The indefinite form is not valid DER.
+        let indefinite = [0x80u8, 0x00, 0x00];
+        assert_eq!(read_length(&indefinite), None);
+        // A leading zero byte makes the long form non-minimal, so the same
+        // length has to be refused rather than read at a second width.
+        let non_minimal = [0x82u8, 0x00, 0x03, b'a'];
+        assert_eq!(read_length(&non_minimal), None);
+        // A long form wider than a `usize` can address.
+        let too_wide = [0x89u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        assert_eq!(read_length(&too_wide), None);
+        // A length wider than the remaining input is reported as read and then
+        // refused by the caller, never silently shortened.
+        let overrunning = [0x05u8, b'a'];
+        assert_eq!(read_length(&overrunning), Some((5, &overrunning[1..])));
     }
 
     /// Trailing bytes after the certificate make it malformed rather than

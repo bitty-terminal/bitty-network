@@ -879,6 +879,103 @@ fn credential_bearing_proxy_urls_are_rejected_and_never_rendered() {
     forbid(&rendered, "operator", "debug output never carries userinfo");
 }
 
+/// The deny-all fallback is fail-closed *and* says so.
+///
+/// `HttpNetworkService::new` is infallible, so a client that cannot be built has
+/// nowhere to return an error and the service falls back to refusing everything.
+/// That is the right failure direction, but silently it is
+/// indistinguishable from a service built during an outage, so the fallback
+/// records `deny_all` and the redacting `Debug` reports it.
+///
+/// The flag is pinned from both sides. A normally-constructed service must not
+/// claim to be deny-all, or the signal is worthless; and the flag must not
+/// become a channel for the cause, which is why only the boolean is stored and
+/// the cause is bound and dropped at the construction site.
+#[cfg(feature = "http")]
+#[test]
+fn the_deny_all_fallback_is_reported_and_carries_no_cause() {
+    use bitty_network::{HttpNetworkService, NetworkCapability};
+
+    let service = HttpNetworkService::new(NetworkCapability::offline().with_domain("example.com"));
+    let rendered = format!("{service:?}");
+    require(
+        &rendered,
+        "deny_all",
+        "the redacting debug must report whether the deny-all fallback was taken",
+    );
+    require_unwrapped(
+        &rendered,
+        "deny_all: false",
+        "a service that built its clients normally must not claim to be deny-all",
+    );
+
+    // The cause is bound and dropped, not stored: the only construction outcome
+    // the service carries is the boolean, so there is no field a future change
+    // could widen into a leak without this turning red. The parameter itself
+    // legitimately names `cause`, so the check is on the struct literal.
+    let http = code_only(HTTP_SOURCE);
+    let fallback = function_body(&http, "fn offline(");
+    require(
+        &fallback,
+        "cause: NetworkError",
+        "the deny-all constructor is told why it was reached, so the swallow is a \
+         named decision rather than a wildcard",
+    );
+    let built = fallback
+        .find("Self {")
+        .expect("the deny-all constructor must build a service");
+    // Field-shaped needles, not the bare word: this window is the rest of the
+    // `impl` block, whose prose is full of "because".
+    for stored in ["cause:", "cause,", "cause)"] {
+        forbid(
+            &fallback[built..],
+            stored,
+            "the cause must not be stored on the service, where it could reach Debug",
+        );
+    }
+    require(
+        &fallback[built..],
+        "deny_all: true",
+        "the stored outcome is the boolean, which is the whole diagnostic",
+    );
+}
+
+/// The "no client in this slot" refusal is not a TLS failure.
+///
+/// The egress set is built with one client per identity slot, so a slot miss
+/// cannot happen; the arm exists so a miss is a typed refusal rather than a
+/// fall back to another slot's client, which would present a certificate the
+/// destination never selected. Reporting it as `Tls { IdentityInvalid }` named a
+/// client-identity problem an operator would go looking for in a policy that is
+/// perfectly fine — the slot is empty because the service holds no client at
+/// all, not because any identity is bad.
+///
+/// Pinned textually, and honestly: the arm is unreachable through the public API
+/// by construction, so there is no behaviour to assert. A reorder that kept the
+/// `Offline` mapping would pass, which is the accepted cost of pinning shape.
+#[cfg(feature = "http")]
+#[test]
+fn an_empty_identity_slot_is_not_reported_as_a_tls_failure() {
+    let body = function_body(&code_only(HTTP_SOURCE), "fn client_for(");
+    let miss = unwrapped(&body);
+    let refusal = miss
+        .rfind("ok_or(")
+        .expect("the slot lookup must refuse rather than fall back to another slot");
+    let tail = &miss[refusal..];
+    require(
+        tail,
+        "ok_or(NetworkError::Offline)",
+        "a missing client in an identity slot is a no-egress refusal, not a client-identity \
+         failure",
+    );
+    forbid(
+        tail,
+        "TlsFailure",
+        "the slot-miss arm must not report a Tls category: the slot is empty because the \
+         service holds no client, so no identity is at fault",
+    );
+}
+
 /// The offline backend stays fail-closed with the same typed taxonomy the
 /// record relies on for a denied or unreachable destination.
 #[test]

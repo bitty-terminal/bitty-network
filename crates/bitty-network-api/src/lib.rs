@@ -1322,4 +1322,85 @@ mod tests {
         assert!(capped.allows_method(HttpMethod::Post));
         assert!(!capped.allows_method(HttpMethod::Delete));
     }
+
+    /// N1: `is_exact_identity_host` had no coverage, so a body of
+    /// `true` produced no red. Each rejection below is pinned separately, so
+    /// dropping any single clause of `is_exact_host_candidate` turns this red
+    /// rather than silently widening what a rule host may name.
+    #[test]
+    fn exact_identity_host_accepts_only_a_bare_dns_name() {
+        for host in [
+            "example.com",
+            "a",
+            "xn--bcher-kva.example",
+            "sub.example.com",
+            "example.com.",
+            "  example.com  ",
+            "9example.com",
+            "example-1.example",
+        ] {
+            assert!(
+                is_exact_identity_host(host),
+                "{host:?} is a bare DNS name and must be accepted"
+            );
+        }
+
+        for (host, why) in [
+            ("", "an empty name is not a host"),
+            ("   ", "whitespace only"),
+            (
+                ".example.com",
+                "a leading dot is a suffix, not an exact name",
+            ),
+            ("example..com", "an empty interior label"),
+            ("..", "only dots"),
+            ("*.example.com", "a wildcard is not an exact name"),
+            ("exam?ple.com", "a glob character is not a host byte"),
+            ("example.com/path", "a path"),
+            ("example.com:443", "a port"),
+            ("user@example.com", "userinfo"),
+            ("user:pass@example.com", "credentials"),
+            ("https://example.com", "a scheme"),
+            ("example.com#frag", "a fragment"),
+            ("[::1]", "an IP literal in brackets"),
+            ("::1", "an unbracketed address"),
+            ("back\\slash.example", "a separator"),
+            ("exam\nple.com", "an interior control byte"),
+            ("example\u{7}com", "a delete byte"),
+            ("ex ample.com", "interior whitespace"),
+        ] {
+            assert!(
+                !is_exact_identity_host(host),
+                "{host:?} must be refused because {why}"
+            );
+        }
+    }
+
+    /// The structural layer rejects by shape; IDNA normalization is the
+    /// backend's job, so a name that is shaped like a host but is not a legal
+    /// one is *accepted* here and refused there. This test records that seam
+    /// explicitly, so the two layers are not later mistaken for one.
+    ///
+    /// `exam!ple.com` is the witness: it passes every structural clause (no
+    /// wildcard, no scheme, no port, no userinfo, no whitespace) and is refused
+    /// by `idna::domain_to_ascii_strict`. The record's "no wildcard, no suffix,
+    /// no default" claim therefore rests on IDNA for the legal-name question and
+    /// on this function for the shape question, and the backend pins the IDNA
+    /// half in `tests/tls_client_identity.rs`.
+    #[test]
+    fn structural_layer_is_strictly_about_shape_and_defers_idna() {
+        // Shape-legal, IDNA-illegal: accepted here, refused by the backend.
+        assert!(is_exact_identity_host("exam!ple.com"));
+        assert!(is_exact_identity_host("exämple.com"));
+        // Shape-illegal even though IDNA would accept the name itself.
+        assert!(!is_exact_identity_host("*.exämple.com"));
+        // Trailing-dot and surrounding-whitespace tolerance is deliberate: the
+        // backend canonicalizes both sides with the same function, so accepting
+        // them here cannot desynchronize the rule host from the destination.
+        // It extends to a trailing *control* byte, because `trim` removes one
+        // along with the whitespace; the refusal is for control bytes that
+        // survive trimming, i.e. ones in the interior.
+        assert!(is_exact_identity_host("Example.COM."));
+        assert!(is_exact_identity_host("\texample.com\n"));
+    }
 }
