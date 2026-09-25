@@ -43,9 +43,14 @@
 //!   false positive to fix in the test, not a security hole, and the failure
 //!   message names the property so the fix is obvious.
 //!
-//! Crate layout assertions use `CARGO_MANIFEST_DIR` and a directory read, so
+//! Crate layout assertions use `CARGO_MANIFEST_DIR` and a directory walk, so
 //! a new module cannot slip in unscanned: the scan is over every `.rs` file
-//! under `src/`, not over a hardcoded module list.
+//! under `src/`, not over a hardcoded module list. The walk is **recursive**,
+//! because `src/` holds module directories beside the flat files that name them
+//! (`src/tls.rs` next to `src/tls/`), and a module directory is not a source
+//! file. Every entry is still held to the same rule — a `.rs` file is scanned, a
+//! directory is descended into, and anything else fails the layout assertion —
+//! so adding a module directory cannot become a way to hide one from the scan.
 
 #![forbid(unsafe_code)]
 
@@ -54,30 +59,56 @@ use std::path::PathBuf;
 /// Display text the offline error must keep, unchanged.
 const OFFLINE_DISPLAY: &str = "network offline";
 
-/// Every `.rs` file in `src/`, sorted, so scan order is deterministic.
+/// Every `.rs` file under `src/`, keyed by its path relative to `src/` and
+/// sorted, so scan order is deterministic.
+///
+/// The walk descends into module directories. It was written when `src/` held
+/// only flat files, and read one level deep, so the first module directory to
+/// land (`src/tls/`, beside `src/tls.rs`) arrived as a single non-`.rs` entry
+/// and failed the layout assertion below. That failure was the assertion doing
+/// its job — it refuses to let an unscanned entry through — but the fix belongs
+/// in the enumerator, not in the property: the walk now holds every entry to the
+/// same rule instead of assuming `src/` is flat.
+///
+/// `file_type` is read without following symlinks, so a symlinked directory is
+/// *not* descended into; it is neither a `.rs` file nor a directory and so fails
+/// the assertion. That is the fail-closed direction: an entry the walk cannot
+/// account for is loud, not skipped.
 fn crate_source_files() -> Vec<(String, String)> {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<(String, String)> = std::fs::read_dir(&src)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", src.display()))
-        .map(|entry| {
-            let path = entry
-                .unwrap_or_else(|error| panic!("cannot read a {} entry: {error}", src.display()))
-                .path();
-            let name = path
-                .file_name()
-                .unwrap_or_else(|| panic!("no file name in {}", src.display()))
+    fn walk(src: &std::path::Path, dir: &std::path::Path, files: &mut Vec<(String, String)>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
+        for entry in entries {
+            let entry = entry
+                .unwrap_or_else(|error| panic!("cannot read a {} entry: {error}", dir.display()));
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(src)
+                .unwrap_or_else(|_| panic!("{} is not under {}", path.display(), src.display()))
                 .to_string_lossy()
                 .into_owned();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()));
+            if file_type.is_dir() {
+                walk(src, &path, files);
+                continue;
+            }
             assert_eq!(
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("rs"),
-                "{name} is not a Rust source file"
+                "{relative} is neither a Rust source file nor a module directory, so it \
+                 would escape the scan of src/"
             );
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-            (name, text)
-        })
-        .collect();
+            files.push((relative, text));
+        }
+    }
+
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    walk(&src, &src, &mut files);
     files.sort_by(|left, right| left.0.cmp(&right.0));
     assert!(!files.is_empty(), "no crate source files found");
     files
@@ -184,13 +215,30 @@ fn require_index(haystack: &str, needle: &str, what: &str) -> usize {
         .unwrap_or_else(|| panic!("{what}: expected {needle:?} in:\n{haystack}"))
 }
 
+/// Assert `needle` occurs in `haystack`, or panic naming the property.
+fn require(haystack: &str, needle: &str, what: &str) {
+    assert!(
+        haystack.contains(needle),
+        "{what}: expected {needle:?} in:\n{haystack}"
+    );
+}
+
+/// Assert `needle` does not occur in `haystack`, or panic naming the property.
+fn forbid(haystack: &str, needle: &str, what: &str) {
+    assert!(
+        !haystack.contains(needle),
+        "{what}: {needle:?} must not appear in:\n{haystack}"
+    );
+}
+
 /// Ambient discovery is off at every client construction site in the crate.
 ///
 /// The record's "discovery stays off" rule is that **every** client builder
 /// calls `.no_proxy()` before a selected route is added, and that no
 /// unconfigured client can be constructed to bypass it. This test is the only
-/// pin of that rule. It walks every `src/*.rs` module, so a new module cannot
-/// open a construction path unscanned, and additionally bans an
+/// pin of that rule. It walks every `.rs` file under `src/`, module directories
+/// included, so a new module cannot open a construction path unscanned, and
+/// additionally bans an
 /// `unwrap_or_else` fallback, which the record forbids because a silent
 /// fallback client would restore reqwest's default `auto_sys_proxy = true`
 /// while still looking fail-closed. It is not feature-gated, so it holds in
@@ -263,22 +311,95 @@ fn http_is_the_only_reqwest_client_construction_site() {
     }
 }
 
+/// Every proxy injection in `site` is preceded, in the same function, by a
+/// credential check that refuses.
+///
+/// This is the per-injection form of the record's "validated before injecting"
+/// rule, and it is deliberately stronger than a presence check:
+///
+/// - It walks the injection sites in order, so a check that guards the first
+///   one cannot be counted as guarding a second one added after it.
+/// - For each injection it takes the **nearest preceding** check, so a check
+///   moved *after* an injection leaves that injection unguarded and fails.
+/// - It requires a `return` between that check and the injection it guards, so a
+///   check that only recorded the finding, or one hoisted above a branch that
+///   does not abort, fails rather than passing on the strength of its own name.
+/// - It requires at least one injection, so the pin cannot go quietly vacuous if
+///   the constructor it watches stops injecting anything.
+///
+/// The one refactor it does not catch is hoisting the check to cover *every*
+/// entry of the route and refusing the whole route — and that is deliberate.
+/// Such a constructor refuses strictly more than this one, so passing it is
+/// correct rather than a gap. A pin that failed it would be refusing a stronger
+/// control, which is the wrong way round.
+fn every_injection_is_guarded_by_a_refusing_credential_check(source: &str, site: &str, path: &str) {
+    const CHECK: &str = "proxy_url_has_credentials(";
+    const INJECT: &str = ".proxy(";
+
+    let body = function_body(source, site);
+    let injections: Vec<usize> = body.match_indices(INJECT).map(|(at, _)| at).collect();
+    assert!(
+        !injections.is_empty(),
+        "{path}: {site} injects no proxy, so the credential check it is meant to guard is \
+         unreachable and this pin would pass vacuously"
+    );
+    for (nth, injected) in injections.iter().enumerate() {
+        let nth = nth + 1;
+        let checked = body[..*injected].rfind(CHECK).unwrap_or_else(|| {
+            panic!(
+                "{path}: injection {nth} in {site} has no {CHECK} before it, so a \
+                 credential-bearing proxy URL would reach the client"
+            )
+        });
+        assert!(
+            body[checked..*injected].contains("return"),
+            "{path}: injection {nth} in {site} has a {CHECK} before it but the span between \
+             them refuses nothing, so the check cannot stop this injection"
+        );
+    }
+}
+
 /// The explicit path reaches the credential check before injecting a proxy.
 ///
 /// `with_proxy` is the deliberate-operator path, and the record requires it
 /// to be rejected before a client is built — never "build a client first to
-/// validate later". `ProxyRoute::explicit` must therefore validate before it
-/// calls `proxy_client`, which is the function that injects.
+/// validate later". That rule is no longer one ordering inside one function:
+/// CTX-0021 made the clients per TLS identity slot, so the client is now built
+/// later, from the route, in `Egress::build`. The refusal moved with it and is
+/// still two-sided, so both sides are pinned here:
+///
+/// - **At the door.** `ProxyRoute::explicit` validates through the shared
+///   validator, so a credential-bearing URL never becomes a route and there is
+///   nothing downstream that could inject it.
+/// - **At the injection.** The constructor that receives the route re-checks
+///   immediately before every `builder.proxy(...)`, so a route that reached it
+///   by any other route still cannot carry userinfo.
+///
+/// Dropping either half alone must fail, so neither is load-bearing on its own
+/// and the pin cannot be satisfied by a single surviving check.
 #[test]
 fn credential_check_precedes_proxy_injection_on_the_explicit_path() {
     let source = http_source();
-    let body = function_body(&source, "explicit");
-    let checked = require_index(body, "validated_proxy_url(", "explicit path");
-    let injected = require_index(body, "proxy_client(", "explicit path");
-    assert!(
-        checked < injected,
-        "the explicit path injects a proxy before the credential check; a \
-         credential-bearing URL must be rejected before a client is built"
+
+    // The door: `with_proxy` -> `with_tls_and_proxy` -> `ProxyRoute::explicit`.
+    let with_proxy = function_body(&source, "with_proxy");
+    require_index(
+        with_proxy,
+        "with_tls_and_proxy(",
+        "the explicit entry point must route through the validating constructor",
+    );
+    let explicit = function_body(&source, "explicit");
+    require_index(
+        explicit,
+        "validated_proxy_url(",
+        "explicit path: the route must be refused before it exists",
+    );
+
+    // The injection: whichever client the route reaches, it re-checks first.
+    every_injection_is_guarded_by_a_refusing_credential_check(
+        &source,
+        "client_with_tls",
+        "explicit path",
     );
 }
 
@@ -286,25 +407,65 @@ fn credential_check_precedes_proxy_injection_on_the_explicit_path() {
 ///
 /// Same rule for the ambient path, and it is the one the record leans on
 /// hardest: an unusable environment proxy must set `proxy_rejected` and fail
-/// every request closed, not degrade to direct egress. `ProxyRoute::from_env`
-/// must validate each variable before `proxy_route_client` injects any of
-/// them.
+/// every request closed, not degrade to direct egress.
+///
+/// The two-sided shape is the same as the explicit path's, and for the same
+/// reason, with one addition that is specific to the environment: it has three
+/// scopes rather than one, and all three land on the same client. A per-scope
+/// check is what makes that safe, so the pin requires the guard on **each**
+/// injection rather than once per function.
 ///
 /// `tests/http.rs::ambient_proxy_environment_is_explicit_and_credential_safe`
 /// already proves the ambient rejection end to end, in a child process. This
 /// pin covers what that test cannot see: the check has to be *reached before*
 /// the injection, and a rejected value that still reached a client would look
-/// identical from the outside.
+/// identical from the outside. The native-roots half of the same rule — the
+/// ordering inside `proxy_client` — is pinned by
+/// `proxy_injection_stays_inside_the_named_construction_paths`.
 #[test]
 fn credential_check_precedes_proxy_injection_on_the_environment_path() {
     let source = http_source();
-    let body = function_body(&source, "from_env");
-    let checked = require_index(body, "validated_proxy_url(", "environment path");
-    let injected = require_index(body, "proxy_route_client(", "environment path");
+
+    // The door: each environment scope is validated on the way in, and
+    // `with_provider` turns a refusal into `proxy_rejected` rather than into an
+    // empty route that would silently mean direct egress.
+    let from_env = function_body(&source, "from_env");
+    let validations = from_env.matches("validated_proxy_url(").count();
     assert!(
-        checked < injected,
-        "the environment path injects a proxy before the credential check; a rejected \
-         value must set proxy_rejected instead of reaching a client"
+        validations >= 3,
+        "the environment path validates {validations} of its scopes; each of the three must go \
+         through the shared validator, or an unvalidated one reaches a client"
+    );
+    let with_provider = function_body(&source, "with_provider");
+    // A refusal must become the rejected marker, not an empty route. An empty
+    // `ProxyRoute` on its own means "no proxy configured", which *is* direct
+    // egress, so the marker is the only thing between a bad ambient value and a
+    // silent downgrade. The arm is pinned whole because the pairing is the
+    // property: an empty route paired with `false` is exactly the downgrade.
+    require(
+        with_provider,
+        "Err(_) => (ProxyRoute::default(), true)",
+        "a refused environment proxy must be marked rejected; an empty route paired with \
+         `false` is direct egress",
+    );
+    // And the marker has to reach the service, or deciding it changes nothing.
+    let built = with_provider.rfind("from_egress(").unwrap_or_else(|| {
+        panic!(
+            "with_provider must build the service through from_egress, but found:\n{with_provider}"
+        )
+    });
+    require(
+        &with_provider[built..],
+        "proxy_rejected)",
+        "the ambient rejection must be forwarded to the constructed service, not decided and \
+         dropped",
+    );
+
+    // The injection: per scope, immediately before it.
+    every_injection_is_guarded_by_a_refusing_credential_check(
+        &source,
+        "client_with_tls",
+        "environment path",
     );
 }
 
@@ -318,7 +479,7 @@ fn credential_check_precedes_proxy_injection_on_the_environment_path() {
 /// Three things hold it, and each closes a hole the others leave:
 ///
 /// - The injection sites are pinned by *call*, not by name: every
-///   `reqwest::Proxy`/`.proxy(` in the crate must sit inside one of the four
+///   `reqwest::Proxy`/`.proxy(` in the crate must sit inside one of the
 ///   named construction functions. This is the name-independent half, and it is
 ///   what catches a second validator that is actually used — a rename, a new
 ///   module, or a copy of the helper.
@@ -334,8 +495,17 @@ fn credential_check_precedes_proxy_injection_on_the_environment_path() {
 #[test]
 fn proxy_injection_stays_inside_the_named_construction_paths() {
     /// The only functions allowed to touch `reqwest::Proxy` or `.proxy(`.
-    const INJECTION_SITES: [&str; 4] = [
+    ///
+    /// `client_with_tls` joined this list when CTX-0021 made the clients per TLS
+    /// identity slot: the proxied client for a configured route is now built
+    /// there rather than by `proxy_client`/`proxy_route_client`, which remain as
+    /// the native-roots constructors. It is listed because it *is* an injection
+    /// site, and the name-independent half of this pin is only sound if every
+    /// real injection site is named: a site left off the list would be exempt
+    /// from the containment check while still being an injection.
+    const INJECTION_SITES: [&str; 5] = [
         "client_with",
+        "client_with_tls",
         "proxy_client",
         "reqwest_proxy",
         "proxy_route_client",
@@ -421,14 +591,83 @@ fn proxy_injection_stays_inside_the_named_construction_paths() {
          validated_proxy_url instead of getting a path of its own"
     );
 
+    // The native-roots injection site is guarded in its own right, so the
+    // shared validator is not the only thing standing in front of it. CTX-0021
+    // moved the `reqwest::Proxy` construction into the shared `reqwest_proxy`
+    // helper, so "before the injection" is now two steps rather than one: the
+    // check must precede the helper call that obtains the proxy *and* the
+    // `.proxy(...)` that hands it to the builder. Pinning both is stricter than
+    // the single ordering this replaced.
     let source = http_source();
     let body = function_body(&source, "proxy_client");
     let checked = require_index(body, "proxy_url_has_credentials(", "proxy_client");
-    let injected = require_index(body, "reqwest::Proxy::all(", "proxy_client");
-    assert!(
-        checked < injected,
-        "proxy_client builds a reqwest::Proxy before checking for userinfo; the shared \
-         validator cannot be the only guard if the injection site is unguarded"
+    for step in ["reqwest_proxy(", ".proxy("] {
+        let at = require_index(
+            &body[checked..],
+            step,
+            "proxy_client must obtain and inject the proxy after the credential check",
+        ) + checked;
+        assert!(
+            checked < at,
+            "proxy_client reaches {step} before checking for userinfo; the shared validator \
+             cannot be the only guard if the injection site is unguarded"
+        );
+    }
+}
+
+/// A configured route applies **every** scope it carries on the TLS path too.
+///
+/// The proxy decision and the TLS policy are orthogonal, so a client with a TLS
+/// configuration must still be a fully-configured proxied client. Its
+/// constructor says so — "a configured route applies every scope it carries,
+/// exactly as `proxy_route_client` does" — and the behavioural pin beside it
+/// (`an_explicit_proxy_is_still_applied_when_a_tls_policy_is_configured`, in
+/// `tls_local_endpoint.rs`) only proves that *a* proxy is applied, using a
+/// single-scope route.
+///
+/// That gap is exactly where a plausible refactor goes wrong: narrowing the
+/// three-scope route to one selected scope still passes the behavioural test,
+/// still applies a proxy, and silently drops the other two — which sends
+/// scheme-scoped traffic direct. So the iteration itself is pinned.
+///
+/// A single-scope selector is named and forbidden rather than merely implied,
+/// because that is the shape the mutation takes: `route.for_url(..)` picks one
+/// scope and is correct for choosing *this request's* proxy in
+/// `selected_proxy`, so it cannot be banned crate-wide — only inside the
+/// constructor that must apply them all.
+///
+/// Deliberately **not** behind `#![cfg(feature = "http")]`, for the reason this
+/// file's other pins give: it reads `src/http.rs` as text through
+/// `CARGO_MANIFEST_DIR`, and that file is on disk whatever the feature gate
+/// says. It builds no client and starts no socket, so there is nothing to gate.
+/// A pin that only runs in the `http` leg is a pin that can quietly stop
+/// running — and the default leg is where a `src/tls/` change would land
+/// unnoticed.
+#[test]
+fn a_tls_client_applies_every_scope_of_its_configured_route() {
+    let source = http_source();
+    let body = function_body(&source, "client_with_tls");
+    require(
+        body,
+        "for (url, scope) in route.entries()",
+        "the TLS-path client must iterate every scope of the route, not select one",
+    );
+    require(
+        body,
+        "builder = builder.proxy(reqwest_proxy(url, scope).ok()?)",
+        "each scope must be injected on its own, with the scope it was configured for",
+    );
+    forbid(
+        body,
+        "route.for_url(",
+        "a single-scope selector here would drop the other scopes and send scheme-scoped \
+         traffic direct; `for_url` belongs in `selected_proxy`, which picks one URL for one \
+         request",
+    );
+    forbid(
+        body,
+        "ProxyScope::All",
+        "hard-coding one scope in the constructor is the same narrowing by another name",
     );
 }
 

@@ -39,6 +39,22 @@ A pin on the base commit itself is deliberately absent. "The base is
 would be deleted on sight at the next merge, which is why no assertion in
 `crates/bitty-network/tests/tls_baseline_properties.rs` names a commit.
 
+**Implementation-branch note (CTX-0021).** This record's base pin still names
+the design-stage base, and the paragraph above describing "this branch" adding
+only the record and its test file describes the decision lane, not the
+implementation branch. CTX-0021 rebased onto `origin/main` (`7c6fdd3`) and
+implements the policy, so on that branch the working tree and the base pin no
+longer agree and the design-stage sentences are _not_ current-state claims about
+it. That divergence is exactly what the scoping rule above and
+`tls_module_is_no_longer_a_sealed_marker` exist to make visible, and the pins
+are evaluated against the working tree, so they report the implementation. The
+sentences re-read and corrected for this branch are the three the rebase and the
+review moved: the `proxy`-gate pin name, the egress-control pin and its file,
+and the native-root failure sentence, whose enforcement limit is now stated
+above. No other sentence was re-verified claim by claim, so the rest remain
+scoped to `941c235` and must be re-read before being relied on at
+`7c6fdd3`.
+
 Parent: #14 (unified TLS provider slice; custom CA and client identity).
 
 ## Decision
@@ -98,6 +114,23 @@ handshake fails rather than silently continuing with custom-only trust. This
 record defines no custom-only mode. Adding one requires an explicit future
 decision that records the narrower trust model and its compatibility impact.
 
+**Where "if native roots cannot be loaded, fail" is actually enforced.** The
+implementation proves the native load by admitting the supplied anchors into a
+verifier built from the platform's own root store, and refuses when the
+resulting store is empty. That proof is a real load on Linux, where reading the
+platform store can fail and the verifier surfaces it. It is a **tautology on
+macOS and Windows**: `rustls-platform-verifier` composes the OS trust store
+additively and `Verifier::new` returns `Ok` unconditionally there, so the probe
+cannot fail and the guard has nothing to catch. This is not a bypass — on those
+platforms the composition is additive by construction, so a custom root cannot
+displace a native one and the additive property holds without the probe. But the
+_refusal_ is only **enforced** on Linux, and this record does not claim
+otherwise: the sentence above is a design requirement that Linux is verified
+against, not a control that is independently witnessed on all three targets. A
+future change that made macOS or Windows able to return an empty or partial
+store would need its own proof on those platforms; nothing in the current suite
+would notice.
+
 When the CA source is unset, the provider performs no bundle read or PEM
 parse, installs no custom root, and uses the native roots exactly as the
 backends use them at the pinned base. Those native roots are supplied by the
@@ -135,6 +168,37 @@ client certificate. Reusing one identity on several hosts therefore requires
 listing each host explicitly; a certificate configured for one host is never
 selected merely because another host is a parent, subdomain, redirect target,
 or shares a suffix.
+
+**The two layers enforcing "exact", and which one is load-bearing.** A rule
+host is checked twice before selection, by two independent layers that answer
+the same question differently:
+
+- A **structural** check in the `-api` crate
+  (`is_exact_identity_host`) rejects what can never be a host at all: an empty
+  name, a wildcard or glob character, a scheme, a port, a path, userinfo, a
+  bracket or backslash, and interior whitespace or control bytes.
+- **IDNA** (`idna::domain_to_ascii_strict`) then canonicalizes the name, and
+  refuses what is shaped like a host but is not a legal one.
+
+The layers overlap, and IDNA is the **stronger** of the two, so the structural
+check is not load-bearing on its own. The witness is `exam!ple.com`: it passes
+every structural clause and is refused by IDNA. Removing the structural layer
+entirely changes no observable behaviour, because everything it rejects is
+independently rejected downstream. The same is true of the PEM section-label
+check in the CA-bundle loader: a private-key PEM body is refused as a malformed
+certificate by the anchor reader regardless.
+
+Both layers are kept, and both are **unit-pinned**
+(`exact_identity_host_accepts_only_a_bare_dns_name`,
+`structural_layer_is_strictly_about_shape_and_defers_idna`), but their being
+pinned is not the same as their being necessary, and this record does not claim
+it. The property this section states — no wildcard, no suffix, no default — is
+enforced by IDNA, and that is what a reviewer should test. An earlier
+implementation report asserted that removing _both_ overlapping layers turned
+four pins red; that was measured and is **not reproducible** — the suite stayed
+green in the default, `http`, and `http,websocket` legs with both removed. The
+claim is withdrawn. The accurate statement is the one above: each layer is
+individually non-load-bearing, and the guarantee rests on IDNA.
 
 Here, "issued for" means cryptographic certificate identity validation for
 the canonical target, not merely that a rule names the host. The selected
@@ -232,8 +296,19 @@ what covers that case.
 The transport-level egress control this record leans on — every reqwest client
 builder disabling ambient system-proxy discovery and redirect following, and no
 unconfigured client constructor bypassing them — is pinned by
-`every_client_builder_disables_ambient_proxy_and_redirects` in
-`crates/bitty-network/tests/http.rs`.
+`every_client_construction_site_disables_ambient_discovery` in
+`crates/bitty-network/tests/pac_decision_pins.rs`.
+
+That pin supersedes and replaces
+`every_client_builder_disables_ambient_proxy_and_redirects`, which this record
+previously cited in `crates/bitty-network/tests/http.rs`. The narrower scanner
+was deleted rather than kept in parallel: it read only `src/http.rs` and sat
+behind `#![cfg(feature = "http")]`, so it covered a subset of the sources in
+only some CI legs. The replacement walks every `.rs` file under `src/` —
+module directories included — in every leg, and additionally bans the
+`unwrap_or_else` fallback and confines proxy injection to the named
+construction functions, none of which the narrower scanner could see. Two
+scanners for one property drift apart; this record names the surviving one.
 
 One pin asserts a gap on purpose: the absence of a bundled root store
 (`webpki-roots`) in the resolved graph, because one appearing would silently

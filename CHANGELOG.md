@@ -152,6 +152,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TLS policy, so an anchor that has expired since construction cannot refuse a
   connection that reads no trust anchor. An inline key source is parsed in
   place rather than copied into a second heap buffer.
+- CTX-0021 round two. The branch is rebased onto `origin/main` (`7c6fdd3`); the
+  previous head was cut from `5d98440`, so its diff against `main` read as a
+  revert of the PAC decision and its pins, and `decision_citations` and
+  `proxy_credential_policy` were red on the stale base. Both are green from
+  `main`'s own fix; neither was changed here.
+- CTX-0021 round two repairs the PAC pin suite, which CTX-0021 itself broke by
+  introducing `src/tls/` as a module directory beside `src/tls.rs`. The crate
+  source enumerator read one level deep and asserted every entry was a `.rs`
+  file, so the new directory failed the layout assertion and six of the eight
+  pins went red. The walk is now recursive and holds every entry to the same
+  rule, so a module directory cannot become a way to hide a source file from the
+  scan. The two ordering pins and the injection-site list are updated for the
+  per-identity client, which is where proxy injection and the credential check
+  now live; each is pinned more strictly than before, and none is relaxed. No
+  egress control changed: every client still carries `.no_proxy()` and
+  `Policy::none()`, `Client::new()` and `unwrap_or_else` remain banned, and
+  `client_with_tls` still checks for userinfo immediately before each
+  `builder.proxy(...)`.
+- CTX-0021 round two closes three coverage gaps found in review and records two
+  honest negatives. `is_exact_identity_host` had no test, so a body of `true`
+  produced no red; it is now covered clause by clause. The empty-`basicConstraints`
+  and too-short-`keyUsage` arms of the X.509 reader are now exercised, as is
+  every level of the three-deep `Name` walk. A missing client in an identity slot
+  is now reported as `NetworkError::Offline` rather than a client-identity
+  failure, because the slot is empty when the service holds no client and no
+  identity is at fault. The deny-all fallback in `HttpNetworkService::new` now
+  records that it was taken, so a fail-closed service is distinguishable from one
+  built during an outage.
+- CTX-0021 round two **withdraws** an earlier claim. Two overlapping layers
+  enforce that a client-identity rule host is an exact DNS name — a structural
+  check and IDNA — and the report asserted that removing both turned four pins
+  red. Measured, it does not: the suite stays green with both removed. IDNA is
+  the stronger layer and the guarantee rests on it. The record now says so, and
+  the X.509 `keyUsage` length guard is likewise recorded as provably redundant
+  with the DER padding check rather than as pinned coverage.
 
 ### Security
 

@@ -1063,6 +1063,26 @@ mod tests {
     /// A set bit in the DER padding is malformed rather than a usage, so a
     /// string that would otherwise answer "yes" by reading padding is refused
     /// instead.
+    ///
+    /// **The length arm is covered but not load-bearing, and no test can make it
+    /// so.** The `significant_bits <= KEY_CERT_SIGN_INDEX` guard is redundant
+    /// with the padding check above it, and the redundancy is provable rather
+    /// than incidental:
+    ///
+    /// - A bit string long enough to reach `significant_bits <= 5` with more
+    ///   than one octet cannot exist: `significant_bits >= 8 * (len - 1)`, so
+    ///   `len >= 2` already implies `significant_bits >= 8`.
+    /// - At `len == 1` the guard fires only when `unused >= 3`, and the padding
+    ///   mask `(1 << unused) - 1` then covers the `keyCertSign` bit, so a set
+    ///   one is already `Malformed` before the guard is reached.
+    ///
+    /// So every input that reaches the guard answers "no" with or without it.
+    /// Dropping it is a green mutation, and that is a property of the reader
+    /// rather than a gap in this test. The guard is kept anyway: it is the
+    /// statement of intent that the *length* is what bounds the read, and
+    /// removing a correct safety net to make a mutation matrix tidier is the
+    /// wrong trade. The claim is recorded here so the next reader does not
+    /// mistake redundancy for coverage.
     #[test]
     fn key_usage_needs_a_long_enough_bit_string_and_zero_padding() {
         // BIT STRING contents are `<unused-bits> <octets...>`.

@@ -1018,6 +1018,23 @@ fn offline_backend_fails_closed_with_typed_errors() {
 /// The behavioral half lives in the provider's own unit tests, which drive the
 /// probe to `false`; this is the structural half, so deleting the guard cannot
 /// leave the suite green by removing the only place the decision is made.
+///
+/// **What this pin does and does not catch, stated rather than implied.** It
+/// matches the guard's *text*, so it proves the guard is present and shaped as
+/// intended. It does not prove the guard is *reached* before the composition
+/// call, and a behaviour-preserving reorder — moving the `if` below
+/// `Verifier::new_with_extra_roots` while keeping it textually identical —
+/// would leave this pin green. That is an accepted cost, not an oversight: a
+/// textual pin cannot observe control flow, and the alternative is a refactor
+/// that makes the order observable at the cost of the shape the record's own
+/// reasoning is about. The behavioural tests in `provider.rs` cover the
+/// *outcome*; this covers the *shape*; neither claims the other's coverage.
+///
+/// **The probe is only a probe on Linux.** `Verifier::new` returns `Ok`
+/// unconditionally on macOS and Windows, where the platform verifier composes
+/// additively by construction, so the guard cannot fire there. The record states
+/// this limit; the property under test is the fail-closed decision, which is
+/// real where the store can fail to load and vacuous where it cannot.
 #[test]
 fn a_missing_platform_root_store_is_refused_rather_than_trusted_around() {
     let build = function_body(TLS_PROVIDER_SOURCE, "fn build_verifier_with(");
