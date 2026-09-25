@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-feature fail-closed CI matrix (`client`/`server`/`quic`/`proxy`/
   `oauth`): each feature is verified in isolation so unowned direction
   decisions cannot silently enable surface.
+- CTX-0034 applies the `proxy` feature gate to `HttpNetworkService::new`:
+  without the feature the service reads no proxy variable at all
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`, in either
+  casing), so egress is direct-only and an ambient proxy cannot be
+  inherited; with the feature, current behavior is unchanged. Explicit
+  `with_proxy` construction is never gated. The unconditional
+  reqwest controls (`.no_proxy()` and `Policy::none()` on every client, and
+  credential-bearing proxy URLs rejected) come from CTX-0028 and are
+  unaffected by this feature.
 - Pinned the `idna_adapter` and ICU tree to 1.85-compatible versions.
 
 ### Security

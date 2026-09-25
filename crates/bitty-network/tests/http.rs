@@ -3,16 +3,17 @@
 //! All servers are loopback `TcpListener`s on ephemeral ports: no external
 //! network, no hardcoded ports. Coverage: plain round-trip through the
 //! shared client, loopback bypass of an environment proxy, explicit ambient
-//! proxy routing and credential rejection, timeout fail-closed with typed
-//! [`NetworkError::Timeout`], capability-denied requests never touching a
-//! socket, explicit-proxy routing, fail-closed WebSocket, and redirect
-//! re-authorization (issue #37): same-origin hops followed with headers
-//! intact, cross-origin hops stripped of sensitive headers, denied second
-//! hops never sent, redirect loops stopped at the hop limit, and a hop chain
-//! bounded by the caller's single deadline. The egress controls on every
-//! reqwest client are pinned by a source-level assertion, because the
-//! ambient system-proxy control they carry is inert under the pinned
-//! reqwest feature set.
+//! proxy routing and credential rejection, the `proxy` feature gate on
+//! environment inheritance (issue #29, both feature configurations), timeout
+//! fail-closed with typed [`NetworkError::Timeout`], capability-denied
+//! requests never touching a socket, explicit-proxy routing, fail-closed
+//! WebSocket, and redirect re-authorization (issue #37): same-origin hops
+//! followed with headers intact, cross-origin hops stripped of sensitive
+//! headers, denied second hops never sent, redirect loops stopped at the hop
+//! limit, and a hop chain bounded by the caller's single deadline. The egress
+//! controls on every reqwest client are pinned by a source-level assertion,
+//! because the ambient system-proxy control they carry is inert under the
+//! pinned reqwest feature set.
 //!
 //! [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
 
@@ -190,6 +191,36 @@ const PROXY_PASSWORD_FIXTURE: &str = "fixture-pass";
 const PROXY_CHILD_WAIT: Duration = Duration::from_secs(5);
 const PROXY_CHILD_POLL: Duration = Duration::from_millis(10);
 
+/// Whether the `proxy` feature lets `HttpNetworkService::new` inherit the
+/// environment (issue #29): with it, the ambient route applies; without it,
+/// no proxy variable is read and egress is direct-only.
+///
+/// The expectations below are written per configuration, never per test run,
+/// so `--features http` and `--features http,proxy` each assert their own
+/// behavior instead of one configuration passing vacuously in the other. The
+/// feature flag is read directly rather than through
+/// `bitty_network::proxy::env_proxy_enabled()`: the crate pins the predicate
+/// against the flag in `tests/offline.rs`, so this stays an independent
+/// statement of the expected behavior.
+const AMBIENT_ENV_APPLIED: bool = cfg!(feature = "proxy");
+
+/// Body the origin probe answers with: any request that reached it proves
+/// direct egress.
+const DIRECT_BODY: &[u8] = b"origin-must-stay-unused";
+
+/// Body the ambient proxy probe answers with: any request that reached it
+/// proves the environment proxy was applied.
+const AMBIENT_PROXY_BODY: &[u8] = b"via-proxy";
+
+/// The body an ambient request must return in this configuration.
+const fn expected_ambient_body() -> &'static [u8] {
+    if AMBIENT_ENV_APPLIED {
+        AMBIENT_PROXY_BODY
+    } else {
+        DIRECT_BODY
+    }
+}
+
 fn run_proxy_child() -> bool {
     let Ok(mode) = std::env::var(PROXY_CHILD_MODE) else {
         return false;
@@ -198,14 +229,23 @@ fn run_proxy_child() -> bool {
     let service = allow_loopback();
     match mode.as_str() {
         "credentials" => {
-            let error = service
-                .request(&Request::get(origin))
-                .expect_err("credentialed ambient proxy must fail closed");
-            let exposed = [
-                format!("{service:?}"),
-                format!("{error}"),
-                format!("{error:?}"),
-            ];
+            // The URL is never retained, in either configuration.
+            let mut exposed = vec![format!("{service:?}")];
+            let outcome = service.request(&Request::get(origin));
+            match (AMBIENT_ENV_APPLIED, outcome) {
+                // Feature on: an unusable configured proxy fails closed for
+                // every request, and the error must not carry the credential.
+                (true, Err(error)) => {
+                    exposed.push(format!("{error}"));
+                    exposed.push(format!("{error:?}"));
+                }
+                (true, Ok(_)) => panic!("credentialed ambient proxy must fail closed"),
+                // Feature off: the environment is never read, so the
+                // credentialed URL never reaches this backend at all and
+                // egress stays direct.
+                (false, Ok(response)) => assert_eq!(response.body, DIRECT_BODY),
+                (false, Err(_)) => panic!("gate-off service must egress directly"),
+            }
             assert!(
                 exposed.iter().all(|value| {
                     !value.contains(PROXY_USER_FIXTURE) && !value.contains(PROXY_PASSWORD_FIXTURE)
@@ -216,12 +256,39 @@ fn run_proxy_child() -> bool {
         "route" => {
             let response = service
                 .request(&Request::get(origin))
-                .expect("ambient HTTP proxy route succeeds");
-            assert_eq!(response.body, b"via-proxy");
+                .expect("ambient HTTP proxy request succeeds");
+            assert_eq!(response.body, expected_ambient_body());
         }
         _ => panic!("unknown proxy child mode"),
     }
     true
+}
+
+/// Start `command` and collect its output under a bounded wait.
+///
+/// A child test process is never waited on forever: past
+/// [`PROXY_CHILD_WAIT`] it is killed, so a hung child fails the test instead
+/// of stalling the suite.
+fn spawn_bounded_child(command: &mut std::process::Command) -> std::process::Output {
+    let mut child = command.spawn().expect("child test process");
+    let deadline = Instant::now() + PROXY_CHILD_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("child test process exceeded its wait bound");
+            }
+            Ok(None) => thread::sleep(PROXY_CHILD_POLL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("child test process wait failed: {error}");
+            }
+        }
+    }
+    child.wait_with_output().expect("child process output")
 }
 
 fn run_proxy_child_process(
@@ -250,25 +317,7 @@ fn run_proxy_child_process(
     if let Some(all_proxy_url) = all_proxy_url {
         command.env("ALL_PROXY", all_proxy_url);
     }
-    let mut child = command.spawn().expect("proxy child process");
-    let deadline = Instant::now() + PROXY_CHILD_WAIT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait_with_output();
-                panic!("proxy child process exceeded its wait bound");
-            }
-            Ok(None) => thread::sleep(PROXY_CHILD_POLL),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait_with_output();
-                panic!("proxy child process wait failed: {error}");
-            }
-        }
-    }
-    child.wait_with_output().expect("proxy child output")
+    spawn_bounded_child(&mut command)
 }
 
 #[test]
@@ -324,7 +373,7 @@ fn ambient_proxy_environment_is_explicit_and_credential_safe() {
     }
 
     for variable in PROXY_ENV_VARS {
-        let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
+        let origin = Probe::start(|_| ok_response(DIRECT_BODY));
         let proxy = Probe::start(|_| ok_response(b"proxy-must-stay-unused"));
         let proxy_url = format!(
             "http://{PROXY_USER_FIXTURE}:{PROXY_PASSWORD_FIXTURE}@{}",
@@ -348,12 +397,21 @@ fn ambient_proxy_environment_is_explicit_and_credential_safe() {
             "proxy credential reached child output"
         );
         assert!(output.status.success(), "proxy credential child failed");
-        assert_eq!(origin_hits, 0, "rejected proxy request reached origin");
-        assert_eq!(proxy_hits, 0, "rejected proxy request reached proxy");
+        // The credentialed URL is never applied as a route: with the feature
+        // the service fails closed, without it the URL is never read at all.
+        assert_eq!(proxy_hits, 0, "credentialed proxy URL was applied");
+        if AMBIENT_ENV_APPLIED {
+            assert_eq!(origin_hits, 0, "rejected proxy request reached origin");
+        } else {
+            assert_eq!(
+                origin_hits, 1,
+                "gate-off service must reach the origin directly"
+            );
+        }
     }
 
-    let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
-    let proxy = Probe::start(|_| ok_response(b"via-proxy"));
+    let origin = Probe::start(|_| ok_response(DIRECT_BODY));
+    let proxy = Probe::start(|_| ok_response(AMBIENT_PROXY_BODY));
     let all_proxy = Probe::start(|_| ok_response(b"via-all"));
     let output = run_proxy_child_process(
         "route",
@@ -369,15 +427,189 @@ fn ambient_proxy_environment_is_explicit_and_credential_safe() {
     proxy.stop_and_join();
     all_proxy.stop_and_join();
     assert!(output.status.success(), "ambient proxy route child failed");
-    assert_eq!(origin_hits, 0, "ambient HTTP_PROXY was silently ignored");
-    assert_eq!(
-        proxy_hits, 1,
-        "ambient HTTP_PROXY did not use the explicit route"
+    assert_eq!(all_proxy_hits, 0, "ALL_PROXY was applied out of precedence");
+    if AMBIENT_ENV_APPLIED {
+        assert_eq!(origin_hits, 0, "ambient HTTP_PROXY was silently ignored");
+        assert_eq!(
+            proxy_hits, 1,
+            "ambient HTTP_PROXY did not use the explicit route"
+        );
+    } else {
+        assert_eq!(
+            origin_hits, 1,
+            "gate-off service must reach the origin directly"
+        );
+        assert_eq!(
+            proxy_hits, 0,
+            "gate-off service applied an environment proxy"
+        );
+    }
+}
+
+/// The explicit path rejects a credential-bearing proxy URL in both feature
+/// configurations: `with_proxy` fails closed before any client is built, so
+/// neither the proxy nor the origin is dialed.
+#[test]
+fn explicit_proxy_with_credentials_is_rejected() {
+    let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
+    let proxy = Probe::start(|_| ok_response(b"proxy-must-stay-unused"));
+    let proxy_url = format!(
+        "http://{PROXY_USER_FIXTURE}:{PROXY_PASSWORD_FIXTURE}@{}",
+        proxy.url("/").trim_start_matches("http://")
     );
+
+    let error = HttpNetworkService::with_proxy(
+        NetworkCapability::offline().with_domain("127.0.0.1"),
+        &proxy_url,
+    )
+    .expect_err("a credential-bearing proxy url must be rejected");
+    assert_eq!(error, NetworkError::Offline);
+
+    // Rejection precedes every dial and every client build, so the only
+    // possible observable effect would be one of these counters.
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(proxy.hits(), 0, "credentialed proxy was contacted");
     assert_eq!(
-        all_proxy_hits, 0,
-        "ALL_PROXY overrode the scheme-specific HTTP_PROXY"
+        origin.hits(),
+        0,
+        "credentialed proxy request reached origin"
     );
+
+    proxy.stop_and_join();
+    origin.stop_and_join();
+}
+
+const GATE_CHILD_TEST: &str = "environment_proxy_gate_controls_new";
+const GATE_CHILD_MODE: &str = "BITTY_NETWORK_PROXY_GATE_CHILD_MODE";
+const GATE_CHILD_ORIGIN: &str = "BITTY_NETWORK_PROXY_GATE_CHILD_ORIGIN";
+const GATE_CHILD_EXPLICIT: &str = "BITTY_NETWORK_PROXY_GATE_CHILD_EXPLICIT";
+const GATE_PROXIED_BODY: &[u8] = b"ambient-proxy";
+const GATE_DIRECT_BODY: &[u8] = b"origin-direct";
+const GATE_EXPLICIT_BODY: &[u8] = b"explicit-proxy";
+
+/// The body the ambient request must return in this configuration.
+const fn expected_gate_body() -> &'static [u8] {
+    if AMBIENT_ENV_APPLIED {
+        GATE_PROXIED_BODY
+    } else {
+        GATE_DIRECT_BODY
+    }
+}
+
+/// Child half of [`environment_proxy_gate_controls_new`].
+fn run_gate_child() -> bool {
+    let Ok(mode) = std::env::var(GATE_CHILD_MODE) else {
+        return false;
+    };
+    assert_eq!(mode, "1", "unknown proxy gate child mode");
+    let origin = std::env::var(GATE_CHILD_ORIGIN).expect("gate child origin");
+    let explicit = std::env::var(GATE_CHILD_EXPLICIT).expect("gate child explicit proxy");
+
+    // The gate withholds ambient inheritance only: an explicit proxy is a
+    // deliberate operator act and must route in both configurations, even
+    // with every ambient variable pointing somewhere else.
+    let proxied = HttpNetworkService::with_proxy(
+        NetworkCapability::offline().with_domain("127.0.0.1"),
+        &explicit,
+    )
+    .expect("explicit proxy url");
+    let response = proxied
+        .request(&Request::get(&origin))
+        .expect("explicitly proxied request succeeds");
+    assert_eq!(
+        response.body, GATE_EXPLICIT_BODY,
+        "the proxy feature gate withheld explicit configuration"
+    );
+
+    // The ambient request is where the gate decides: this asserts the body,
+    // so a direct request that never reached the origin cannot pass.
+    let service = allow_loopback();
+    let response = service
+        .request(&Request::get(origin))
+        .expect("ambient request succeeds in this configuration");
+    assert_eq!(
+        response.body,
+        expected_gate_body(),
+        "ambient proxy handling does not match the feature configuration"
+    );
+    true
+}
+
+/// The `proxy` feature gates environment-proxy inheritance (issue #29), and
+/// the child process is the only way to inject a hostile environment without
+/// mutating the test runner's own process-wide variables.
+///
+/// One run, two configurations, both discriminating: with the feature the
+/// ambient proxy is used and the origin is never contacted; without it no
+/// proxy variable is read, the request reaches the origin, and the explicit
+/// `with_proxy` route still works. The body assertions mean "not proxied"
+/// cannot be satisfied by a request that simply failed.
+#[test]
+fn environment_proxy_gate_controls_new() {
+    if run_gate_child() {
+        return;
+    }
+
+    let origin = Probe::start(|_| ok_response(GATE_DIRECT_BODY));
+    let ambient = Probe::start(|_| ok_response(GATE_PROXIED_BODY));
+    let explicit = Probe::start(|_| ok_response(GATE_EXPLICIT_BODY));
+    let ambient_url = ambient.url("/");
+
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .arg(GATE_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(GATE_CHILD_MODE, "1")
+        .env(GATE_CHILD_ORIGIN, origin.url("/from-origin"))
+        .env(GATE_CHILD_EXPLICIT, explicit.url("/"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in PROXY_BYPASS_VARS {
+        command.env_remove(name);
+    }
+    // Every spelling, so the assertion does not depend on which one wins.
+    for name in PROXY_ENV_VARS {
+        command.env(name, &ambient_url);
+    }
+    let output = spawn_bounded_child(&mut command);
+    let origin_hits = origin.hits();
+    let ambient_hits = ambient.hits();
+    let explicit_hits = explicit.hits();
+    origin.stop_and_join();
+    ambient.stop_and_join();
+    explicit.stop_and_join();
+
+    let captured = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "proxy gate child failed: {captured}"
+    );
+    // Explicit configuration is never gated: one child request, one hit.
+    assert_eq!(
+        explicit_hits, 1,
+        "with_proxy did not route under this feature configuration"
+    );
+    if AMBIENT_ENV_APPLIED {
+        assert_eq!(ambient_hits, 1, "the environment proxy was not used");
+        assert_eq!(
+            origin_hits, 0,
+            "a proxied request reached the origin directly"
+        );
+    } else {
+        assert_eq!(
+            origin_hits, 1,
+            "the gate-off service did not egress directly"
+        );
+        assert_eq!(
+            ambient_hits, 0,
+            "the gate-off service inherited an environment proxy"
+        );
+    }
 }
 
 #[test]

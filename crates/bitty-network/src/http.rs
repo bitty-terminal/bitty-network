@@ -3,8 +3,8 @@
 //! [`HttpNetworkService`] serves the trait with a single shared reqwest
 //! blocking client: one client per service instance, reused across requests
 //! so connections pool instead of being re-established per call. The client
-//! is built once (proxy resolved from the environment at construction) and
-//! every request flows through it.
+//! is built once (proxy resolved from the environment at construction when
+//! the `proxy` feature is enabled) and every request flows through it.
 //!
 //! Request path, in order:
 //!
@@ -32,13 +32,19 @@
 //! `ALL_PROXY` is the fallback (uppercase names precede lowercase).
 //! `NO_PROXY`/`no_proxy` lists bypassed hosts (exact match, case-insensitive;
 //! a leading-dot entry matches subdomains; `*` bypasses everything).
-//! Reqwest's ambient system/PAC discovery is disabled on every client, so
-//! no unselected variable or platform proxy can bypass this decision. Any
-//! configured proxy that cannot be parsed or carries userinfo is rejected
-//! before a client is built: [`HttpNetworkService::with_proxy`] returns
-//! [`NetworkError::Offline`], while environment configuration makes the
-//! service fail closed for every request instead of silently switching to
-//! direct egress. Credential-bearing URLs are never retained or logged.
+//! The snapshot happens only with the `proxy` feature enabled: without it the
+//! service reads no proxy variable at all and egress is direct-only, so an
+//! ambient variable cannot reach this backend. The explicit
+//! [`HttpNetworkService::with_proxy`] override stays available in both
+//! configurations — it is a deliberate operator act, not ambient authority.
+//! Reqwest's ambient system/PAC discovery is disabled on every client
+//! regardless of the feature, so no unselected variable or platform proxy can
+//! bypass this decision. Any configured proxy that cannot be parsed or carries
+//! userinfo is rejected before a client is built:
+//! [`HttpNetworkService::with_proxy`] returns [`NetworkError::Offline`],
+//! while environment configuration makes the service fail closed for every
+//! request instead of silently switching to direct egress. Credential-bearing
+//! URLs are never retained or logged.
 //!
 //! Timeouts: [`DEFAULT_REQUEST_TIMEOUT`] bounds every request unless the
 //! caller overrides it per request. The bound covers the whole exchange,
@@ -201,11 +207,12 @@ type HopResponse = (u16, Vec<(String, String)>, reqwest::blocking::Response);
 /// Embedded HTTP [`NetworkService`] over shared reqwest blocking clients.
 ///
 /// Holds the caller's [`NetworkCapability`] and the egress clients built at
-/// construction: one direct client plus, when the environment (or
-/// [`HttpNetworkService::with_proxy`]) names a proxy, one proxied client.
-/// Both are shared across requests (connection pools), and the per-request
-/// proxy decision follows the environment bypass list. The default is
-/// deny-all with proxy-off; see the [module docs](self) for the request path.
+/// construction: one direct client plus, when a proxy is configured by
+/// [`HttpNetworkService::with_proxy`] or (with the `proxy` feature) named by
+/// the environment, one proxied client. Both are shared across requests
+/// (connection pools), and the per-request proxy decision follows the
+/// environment bypass list. The default is deny-all with proxy-off; see the
+/// [module docs](self) for the request path.
 ///
 /// [`NetworkService`]: bitty_network_api::NetworkService
 #[derive(Clone)]
@@ -304,14 +311,21 @@ struct Egress {
 }
 
 impl HttpNetworkService {
-    /// Serve HTTP under `capability`, proxy inherited from the environment.
+    /// Serve HTTP under `capability`, inheriting the environment proxy only
+    /// when the `proxy` feature is enabled.
     ///
-    /// Reads the standard proxy variables and `NO_PROXY`/`no_proxy` once; an
-    /// absent proxy means direct egress (proxy-off default), while an
-    /// unusable configured proxy makes the service fail closed. Construction
-    /// performs no I/O.
+    /// With the feature, reads the standard proxy variables and
+    /// `NO_PROXY`/`no_proxy` once; an absent proxy means direct egress
+    /// (proxy-off default), while an unusable configured proxy makes the
+    /// service fail closed. Without the feature no proxy variable is read at
+    /// all: the route is empty, the bypass list is empty, and egress is
+    /// direct-only, so an ambient variable cannot be inherited. Either way
+    /// construction performs no I/O.
     #[must_use]
     pub fn new(capability: NetworkCapability) -> Self {
+        if !crate::proxy::env_proxy_enabled() {
+            return Self::from_egress(capability, ProxyRoute::default(), String::new(), false);
+        }
         let no_proxy = no_proxy_from_env();
         let (route, proxy_rejected) = match ProxyRoute::from_env() {
             Ok(route) => (route, false),
@@ -757,7 +771,8 @@ impl Write for CappedBody {
 }
 
 impl Default for HttpNetworkService {
-    /// Deny-all backend with environment proxy resolution.
+    /// Deny-all backend, with environment proxy resolution when the `proxy`
+    /// feature is enabled.
     fn default() -> Self {
         Self::new(NetworkCapability::offline())
     }
