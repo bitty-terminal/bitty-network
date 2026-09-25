@@ -2,14 +2,27 @@
 //!
 //! The unit pins in `src/dns.rs` reach into the store to drive a fake clock.
 //! This file pins what a consumer outside the module can actually observe
-//! about the cache, which is the property the issue asks for: one shared
-//! store, reachable from every backend, with the bounds and the authority
+//! about the cache: one shared store, with the bounds and the authority
 //! rules holding at the public seam.
+//!
+//! No backend reaches the cache yet. `crate::http` and `crate::websocket` are
+//! owned by other lanes, and nothing in this crate calls [`resolve_shared`]
+//! outside a test — so "used by every backend" is a wiring state this file
+//! neither claims nor tests, and issue #23 stays open for it. What this file
+//! can pin is the half of the adopter obligation that is observable from out
+//! here: that the cache's key granularity and the capability allowlist's
+//! decision granularity are the same relation, asserted against the real
+//! [`NetworkCapability`] rather than against a restatement of the key. The
+//! other half — that a future adapter hands over the check's own host string
+//! and the request's port, neither of which reqwest's resolver hook can
+//! supply on its own — is documented in `src/dns.rs` and is not observable
+//! until that adapter exists.
 //!
 //! No network and no resolver: every resolver here is an in-memory fixture
 //! answering loopback literals, and nothing is ever dialled.
 //!
-//! [`NetworkCapability::check_handshake`]: bitty_network_api::NetworkCapability::check_handshake
+//! [`NetworkCapability`]: bitty_network_api::NetworkCapability
+//! [`resolve_shared`]: bitty_network::dns::resolve_shared
 
 #![forbid(unsafe_code)]
 
@@ -21,6 +34,7 @@ use bitty_network::dns::{
     DEFAULT_DNS_TIMEOUT, DNS_CACHE_MAX_ENTRIES, DnsCache, DnsError, DnsResolver, resolve_cached,
     resolve_shared, shared,
 };
+use bitty_network_api::NetworkCapability;
 
 /// Loopback literals for the in-memory fixtures: never dialled, never
 /// reached, and protocol constants rather than host values.
@@ -226,5 +240,181 @@ fn a_cache_hit_cannot_outlive_cancellation() {
         calls.load(Ordering::SeqCst),
         1,
         "a cancelled call must not reach the resolver even on a hit"
+    );
+}
+
+/// The cache's host equivalence class is the allowlist's, verified against the
+/// real [`NetworkCapability`] rather than against a restatement of the key.
+///
+/// This is the observable half of the adopter obligation in `src/dns.rs`: it
+/// is what makes handing the cache the check's own unmodified host string
+/// *sufficient*. The allowlist is the independent oracle, so a change to
+/// either side's normalization fails here — including a coarsening of the
+/// cache key, which would merge two classes the allowlist still separates.
+#[test]
+fn the_cache_key_class_is_exactly_the_allowlist_class() {
+    // One host, granted on exactly one port. Every spelling below is the
+    // same host to the allowlist, and must be the same key to the cache.
+    let capability =
+        NetworkCapability::offline().with_domain_ports("Granted.Test.", [FIXTURE_PORT]);
+    let cache = DnsCache::new();
+    let (resolver, calls) = CountingResolver::new();
+    let cancel = AtomicBool::new(false);
+
+    for host in ["granted.test", "GRANTED.test.", "  granted.test  "] {
+        assert!(
+            capability.allows(host),
+            "the allowlist must treat {host:?} as the granted host"
+        );
+        let resolved = resolve_cached(
+            &cache,
+            resolver.clone(),
+            host,
+            FIXTURE_PORT,
+            DEFAULT_DNS_TIMEOUT,
+            &cancel,
+        );
+        assert_eq!(
+            resolved,
+            Ok(answer(FIXTURE_PORT)),
+            "the cache must answer {host:?} from the one entry"
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "three spellings of one allowlist class are one cache key, so the resolver is asked once"
+    );
+    assert_eq!(cache.len(), 1, "one class, one entry");
+
+    // A host the allowlist does not know is a different class, so it is a
+    // different key: resolved for itself, never answered from the granted
+    // host's entry.
+    assert!(!capability.allows("other-granted.test"));
+    let resolved = resolve_cached(
+        &cache,
+        resolver.clone(),
+        "other-granted.test",
+        FIXTURE_PORT,
+        DEFAULT_DNS_TIMEOUT,
+        &cancel,
+    );
+    assert_eq!(resolved, Ok(answer(FIXTURE_PORT)));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "an ungranted host must reach the resolver, not inherit the granted host's answer"
+    );
+    assert_eq!(cache.len(), 2, "two classes, two entries");
+
+    // Two separately authorized hosts under one registrable domain are the
+    // case a re-deriving adopter actually gets wrong. Folding
+    // "api.granted.test" down to "granted.test" would merge two hosts the
+    // allowlist authorizes independently into a single entry, and would
+    // merge a granted host with a refused sibling just as readily. Both must
+    // stay distinct here.
+    let siblings = NetworkCapability::offline()
+        .with_domain_ports("api.granted.test.", [FIXTURE_PORT])
+        .with_domain_ports("www.granted.test", [FIXTURE_PORT]);
+    let sibling_cache = DnsCache::new();
+    for host in ["api.granted.test", "www.granted.test"] {
+        assert!(
+            siblings.allows_port(host, FIXTURE_PORT),
+            "the allowlist must authorize {host:?} for itself"
+        );
+        let resolved = resolve_cached(
+            &sibling_cache,
+            resolver.clone(),
+            host,
+            FIXTURE_PORT,
+            DEFAULT_DNS_TIMEOUT,
+            &cancel,
+        );
+        assert_eq!(resolved, Ok(answer(FIXTURE_PORT)));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "one registrable domain, two independently authorized hosts, two resolver calls and two keys"
+    );
+    assert_eq!(sibling_cache.len(), 2);
+
+    // The refused sibling under the same registrable domain reaches the
+    // resolver rather than being answered from either authorized host.
+    assert!(!siblings.allows("cdn.granted.test"));
+    let resolved = resolve_cached(
+        &sibling_cache,
+        resolver.clone(),
+        "cdn.granted.test",
+        FIXTURE_PORT,
+        DEFAULT_DNS_TIMEOUT,
+        &cancel,
+    );
+    assert_eq!(resolved, Ok(answer(FIXTURE_PORT)));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        5,
+        "a refused sibling must not be answered from a sibling host's entry"
+    );
+    assert_eq!(sibling_cache.len(), 3);
+}
+
+/// The port half of the key is what keeps the cache as fine as the
+/// allowlist's per-host port set, again checked against the real
+/// [`NetworkCapability`] as an independent oracle.
+///
+/// An adopter that cannot source the port from reqwest's resolver hook —
+/// that hook's `Name` is a host with no port — and folds the port away would
+/// make the cache coarser than the allowlist. This is the pin that says so:
+/// the allowlist denies the ungranted port while the cache must already
+/// refuse to have an answer for it, and if the key ever lost its port half
+/// these two would disagree.
+#[test]
+fn the_cache_key_is_as_fine_as_the_allowlist_port_set() {
+    let capability =
+        NetworkCapability::offline().with_domain_ports("one-port.test", [FIXTURE_PORT]);
+    let cache = DnsCache::new();
+    let (resolver, calls) = CountingResolver::new();
+    let cancel = AtomicBool::new(false);
+
+    // The granted query.
+    assert!(capability.allows_port("one-port.test", FIXTURE_PORT));
+    let resolved = resolve_cached(
+        &cache,
+        resolver.clone(),
+        "one-port.test",
+        FIXTURE_PORT,
+        DEFAULT_DNS_TIMEOUT,
+        &cancel,
+    );
+    assert_eq!(resolved, Ok(answer(FIXTURE_PORT)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // The same host on a port the allowlist refuses. The allowlist is the
+    // oracle: it denies this query, so a cache that had an entry here would
+    // be coarser than the authority it sits below. The port in the key is
+    // what makes it miss instead.
+    assert!(
+        !capability.allows_port("one-port.test", OTHER_FIXTURE_PORT),
+        "the allowlist must refuse the ungranted port for this host"
+    );
+    let resolved = resolve_cached(
+        &cache,
+        resolver.clone(),
+        "one-port.test",
+        OTHER_FIXTURE_PORT,
+        DEFAULT_DNS_TIMEOUT,
+        &cancel,
+    );
+    assert_eq!(resolved, Ok(answer(OTHER_FIXTURE_PORT)));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the ungranted port must reach the resolver, not be served the granted port's answer"
+    );
+    assert_eq!(
+        cache.len(),
+        2,
+        "two ports on one host are two keys, matching the allowlist's port set"
     );
 }

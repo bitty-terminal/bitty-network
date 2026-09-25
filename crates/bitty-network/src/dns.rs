@@ -14,7 +14,10 @@
 //! * The HTTP backend resolves inside reqwest, but reqwest is not an
 //!   obstacle: the pinned reqwest exposes `ClientBuilder::dns_resolver`, so
 //!   the backend can adopt the same cache by handing reqwest a resolver that
-//!   consults [`shared()`]. That is a change in `crate::http`, not here.
+//!   consults [`shared()`]. That is a change in `crate::http`, not here — and
+//!   it is the one adoption whose key is not fully available at the hook, so
+//!   it carries an obligation this module cannot discharge for itself. See
+//!   "The adopter's key obligation" below.
 //!
 //! So "used by every backend" is a wiring state this module makes possible
 //! and does not itself reach; the cache's bounds and authority rules are
@@ -62,6 +65,51 @@
 //! by the detached worker, whose late answer arrives after that deadline has
 //! been charged and abandoned), and a probe whose own caller deadline has
 //! already passed misses rather than serving for free.
+
+//! # The adopter's key obligation
+//!
+//! Everything above holds *given* that a caller passes the pair the
+//! capability check authorized. The cache cannot verify that, and must not
+//! try: [`resolve_cached`] receives a `&str` and a `u16` and has no view of
+//! the check, so its only correct behaviour is to cache faithfully whatever
+//! host string it is handed. A cache that second-guessed its caller would
+//! have to re-implement the allowlist, and the allowlist is another crate's
+//! authority, not this one's. The obligation is therefore the adopter's, and
+//! it has two halves, each load-bearing:
+//!
+//! * **The host must be the very string the capability check evaluated.**
+//!   [`CacheKey`] applies the allowlist's normalization itself (trim, strip
+//!   trailing dots, lowercase), which is what makes handing over the check's
+//!   own unmodified string *sufficient* rather than merely lucky: the key it
+//!   produces is the authorized class by construction. Re-deriving the host
+//!   instead — folding to a registrable domain, re-running IDNA, stripping
+//!   brackets, or reading it off some other request — can land the entry on
+//!   a key the authorization never covered, and a second, separately
+//!   authorized host can then land on that same key and be answered with it.
+//! * **The port must come from the request, never from the resolver hook.**
+//!   This is a fact about the hook, not a preference. reqwest's override
+//!   point is `Resolve::resolve(&self, name: Name)`, and `Name` is a bare
+//!   host: it offers `as_str()` and nothing more, carries no port, and
+//!   cannot be constructed with one. The port half of [`CacheKey`] is
+//!   therefore *not obtainable* from the hook at all. Nor do the ports in
+//!   the returned addresses help, since reqwest documents that an explicit
+//!   port in the URL overrides any port in the resolved `SocketAddr`s. An
+//!   adopter that keys on the host alone makes the cache **coarser** than
+//!   the allowlist's per-host port set, and one port's answer is then served
+//!   to another port's authorized query — precisely the cross-query reuse
+//!   ruled out above, reached from adopter-side code rather than from here.
+//!
+//! What a test can observe, and does: that this cache's key granularity and
+//! the allowlist's decision granularity are the *same* relation, checked
+//! against the real `bitty_network_api` rather than against a restatement of
+//! the key. That is what makes both halves above checkable in the negative
+//! direction — if the key ever became coarser, the allowlist would still
+//! deny a query the cache had already answered. What no test here can
+//! observe is whether a future adapter passes the *right* string, because
+//! that adapter does not exist yet, lives in files this lane does not own,
+//! and offers no seam this module could check it through. That part is a
+//! wiring-time review obligation, and it becomes enforceable only when the
+//! `crate::http` or `crate::websocket` wiring lands.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -971,6 +1019,41 @@ mod tests {
             cache.probe(&key("kept.test", FIXTURE_PORT), now, None),
             CacheProbe::Addresses(vec![SocketAddr::from((LOOPBACK_ADDRESS, FIXTURE_PORT))])
         );
+    }
+
+    /// A key occupies exactly one insertion-order slot, and a refresh never
+    /// adds a second.
+    ///
+    /// The entry count alone does not pin this. Eviction is driven by the
+    /// *map* length, so a duplicated order slot evicts nothing extra and the
+    /// bound still reads as honoured while the order queue grows by one per
+    /// refresh — an unbounded queue behind a bounded map, which is the
+    /// opposite of what this module is for. Asserting the two lengths agree
+    /// is what makes the invariant on [`CacheState`] real rather than a
+    /// comment.
+    #[test]
+    fn one_slot_per_key_in_insertion_order() {
+        let cache = DnsCache::new();
+        let now = Instant::now();
+        // Fill the store, then refresh one key many times over. Every
+        // refresh takes the `insert` returned `Some` path, so it must leave
+        // the order queue untouched.
+        seed_positive(&cache, "kept.test", FIXTURE_PORT, now);
+        for index in 0..DNS_CACHE_MAX_ENTRIES - 1 {
+            seed_positive(&cache, &format!("filler-{index}.test"), FIXTURE_PORT, now);
+        }
+        for _ in 0..DNS_CACHE_MAX_ENTRIES {
+            seed_positive(&cache, "kept.test", FIXTURE_PORT, now);
+        }
+        let state = cache.lock();
+        assert_eq!(
+            state.order.len(),
+            state.entries.len(),
+            "insertion order must hold exactly one slot per live key: a refresh \
+             duplicates the slot and the order queue then grows without bound \
+             while the entry bound still reads as honoured"
+        );
+        assert_eq!(state.order.len(), DNS_CACHE_MAX_ENTRIES);
     }
 
     // -- cache: bounded ttl ----------------------------------------------------

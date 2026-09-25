@@ -59,6 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ClientBuilder::dns_resolver` is the adoption hook). Both wirings are
   changes in files this lane does not own, so the cache's bounds and
   authority rules are what this change delivers, not a dialed answer.
+  `bitty-network#23` therefore stays open on this change: the criterion it
+  leads with, "used by every backend", is unmet, and the work is split —
+  the cache and its seam land here, while each of the two adopters needs its
+  own task in the `http` and `websocket` lanes.
+- Documented the key obligation each DNS cache adopter inherits, because it is
+  not derivable from the hook: reqwest's override point is
+  `Resolve::resolve(&self, name: Name)`, and `Name` is a bare host with no
+  port and no way to attach one, so the port half of the cache key cannot be
+  obtained from the resolver hook at all (nor from the ports of the returned
+  addresses, which an explicit URL port overrides). An adopter must key the
+  cache on exactly the pair the capability check authorized — the check's own
+  host string, and the port taken from the request — because a host-only key
+  is _coarser_ than the allowlist's per-host port set and would serve one
+  port's answer to another port's authorized query, the cross-query reuse
+  this cache otherwise rules out. The observable half is now pinned against
+  the real `bitty_network_api::NetworkCapability` as an independent oracle:
+  the cache's key granularity and the allowlist's decision granularity are
+  asserted to be the same relation, so a coarsened key would contradict the
+  allowlist and fail. The remaining half — whether a future adapter hands
+  over the right string — is not observable until that adapter exists and is
+  a wiring-time review obligation.
 
 ### Changed
 
