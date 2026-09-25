@@ -1,10 +1,39 @@
 # #25: authenticated proxy credentials — fail-closed policy
 
-Status: proposed; design-stage security-corpus review corrected by CTX-0037 and
-CTX-0039; authenticated proxy support is not implemented on the reviewed
-baseline.
+Status: proposed; design-stage security-corpus review corrected by CTX-0037,
+CTX-0039, and CTX-0044; authenticated proxy support is not implemented on any
+baseline this record reviews.
 
 Parent: #15 (BN-2 policy depth slice).
+
+## Reviewed baselines and how to read this record
+
+This record has been reviewed against two distinct code states, and every status
+claim below names which one it describes, the commit that provides the control,
+and whether that commit is merged.
+
+| Baseline           | Commit    | Merge status                                                                                                     | What it is                                                                                                           |
+| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Merged main        | `de77e17` | merged on `origin/main`                                                                                          | The released mainline, and the only state any consumer can obtain today.                                             |
+| Integration branch | `941c235` | **not merged**; PR #44 open, `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED`, `reviewDecision=REVIEW_REQUIRED` | The verified integration of lanes A, B, and C. Several controls this record requires exist here and nowhere on main. |
+
+`941c235` is a verified, independently reviewed integration branch awaiting a
+code-owner approval that only the repository owner can grant. Nothing on it is
+merged. A control credited to `941c235` is therefore _unmerged and available to
+no consumer_, and it does not satisfy any transition criterion in this record
+until it is merged and independently reviewed as merged code. A control credited
+to `de77e17` is merged but is the pre-remediation state that this record exists
+to correct.
+
+PR #43 (head `ctx-0013/fix-ws-deadline-proxy`) is open and unmerged; its head
+commit is an ancestor of `941c235`, so its proxy and WebSocket content is present
+inside the integration branch under CTX-0040 and CTX-0041. PR #43 itself
+contributes no merged control.
+
+Throughout this record, "the reviewed baseline" without qualification means the
+merged mainline `de77e17`. Where the integration branch differs, the text says
+`941c235` explicitly. Where a control is absent from both, the text says
+"absent from both" rather than implying a pending branch supplies it.
 
 ## Decision
 
@@ -24,8 +53,10 @@ The provider and environment separation remains mandatory:
 `ProxyCredentialProvider` reads secrets only through its caller-provided
 interface, while proxy environment variables remain credential-free routing
 inputs. The backend never reads a secret from the environment. This
-architectural rule does not imply that the reviewed backend already enforces
-userinfo rejection or fail-closed environment handling.
+architectural rule is independent of whether the existing paths enforce it, and
+this record does not credit the architectural rule with any behavioural control.
+The behavioural state of the existing paths is stated per baseline in
+[Control inventory](#control-inventory).
 
 ## Credential source and scope snapshots
 
@@ -108,11 +139,11 @@ The default-port table is closed and applies to both proxy and destination
 origins:
 
 | Scheme  | Default port |
-| ------- | -----------: |
-| `http`  |           80 |
-| `ws`    |           80 |
-| `https` |          443 |
-| `wss`   |          443 |
+| ------- | ------------ |
+| `http`  | 80           |
+| `ws`    | 80           |
+| `https` | 443          |
+| `wss`   | 443          |
 
 An absent port uses the table. An explicit port must be valid and is preserved;
 an explicit default port canonicalizes to the same origin as an absent default
@@ -203,13 +234,27 @@ fails closed until a new service is constructed. Explicit `with_proxy`
 configuration returns a typed failure before retaining or dialing. No failure
 falls back to direct egress, an older route, or unauthenticated proxy use.
 
-The reviewed baseline is defective in this area. On `origin/main` commit
+The merged baseline is defective in this area. On `origin/main` commit
 `de77e17`, HTTP environment handling reads only `HTTPS_PROXY`/`https_proxy` and
 `NO_PROXY`/`no_proxy`; `HttpNetworkService::new` discards an unusable configured
 proxy and becomes direct, `proxy_client` has no structural userinfo rejection,
 the WebSocket path strips proxy userinfo and proceeds to dial, and no client
-builder calls `.no_proxy()`. The provider/backend separation above is a design
-requirement, not evidence that these existing paths enforce it.
+builder calls `.no_proxy()`.
+
+The integration branch at `941c235` (PR #44, **not merged**) repairs most of
+that list but not all of it. It now reads `HTTP_PROXY`, `HTTPS_PROXY`, and
+`ALL_PROXY` with their lowercase forms (`crates/bitty-network/src/http.rs:136`,
+`:139`, `:142`, used at `:257`, `:260`, `:263`); `HttpNetworkService::new`
+records the failure and fails every request closed rather than becoming direct
+(`:311`-`:323`, `:355`-`:359`, called from `:774` and `:785`); `proxy_client`
+rejects proxy-URL userinfo before `Proxy::all` (`:820`-`:834`); the WebSocket
+proxy leg rejects userinfo before dialing (see
+[Control inventory](#control-inventory)); and every client builder calls
+`.no_proxy()` and `Policy::none()` (`:378`-`:388`, `:828`-`:831`,
+`:845`-`:849`). Two residual gaps remain on `941c235` and are recorded as open
+below: `with_proxy` still retains the verbatim validated URL string rather than
+a structurally sanitized endpoint, and the redirect loop still conditions
+sensitive-header stripping on a destination-origin change alone.
 
 ## Pool ownership, checkout, and invalidation
 
@@ -350,19 +395,78 @@ not be retained only to redact it later.
 
 ### Baseline `Debug` and API request types
 
-The reviewed baseline does not provide the claimed safe diagnostics. On
+The merged baseline does not provide the claimed safe diagnostics. On
 `origin/main` commit `de77e17`, `HttpNetworkService` and `Egress` derive
 `Debug`, `Egress` retains `https_proxy`, and `with_proxy` retains the raw URL.
 In `bitty-network-api`, `Request` and `WebSocketRequest` derive `Debug` and can
-contain credential-bearing header values and URLs. The reviewed baseline
+contain credential-bearing header values and URLs. The merged baseline
 therefore has no hand-written redacting `Debug` for these types and no safe
 basis for claiming that a failed equality assertion is redacted.
 
-PR #43 is open and blocked. Its pending branch contains a hand-written
-`HttpNetworkService` `Debug`, pre-dial WebSocket userinfo rejection,
-fail-closed environment handling, `.no_proxy()`, and related tests, but those
-changes are not on `origin/main`; it does not replace the API request derives
-or satisfy this decision's transition criteria.
+The integration branch at `941c235` (PR #44, **not merged**) changes part of
+this and must not be credited with the rest. `833b31e` (CTX-0027) removed the
+`Debug` derive from `HttpNetworkService` and from `Egress` and added a
+hand-written redacting `Debug` for the service
+(`crates/bitty-network/src/http.rs:212`, `:217`-`:225`); it prints only
+`capability`, a `proxy_configured` boolean, a `proxy_rejected` boolean, and
+`finish_non_exhaustive`, so it emits no URL and no field of `Egress`.
+`9fc413e` (CTX-0028) then removed the `https_proxy` field from `Egress` and
+replaced it with `ProxyRoute` (`:235`-`:240`, `:298`-`:304`), so no
+`https_proxy` field exists on `941c235` at all. `Egress` has no `Debug` impl of
+any kind on `941c235`, so it is not printable through any path.
+
+Two of the four defects in the preceding paragraph are therefore closed on
+`941c235` and two are not. A third, separate defect sits on the API surface.
+All three open items are:
+
+1. `with_proxy` does not retain a structurally sanitized endpoint.
+   `validated_proxy_url` returns `url.to_owned()` (`http.rs:807`-`:812`), and
+   `ProxyRoute::explicit` stores that verbatim string in `ProxyRoute.all`
+   (`:243`-`:254`). The retained value is now guaranteed credential-free and
+   parseable, because the retention happens behind the userinfo and parse
+   checks, but it is still the caller's exact bytes rather than a
+   parse-into-sanitized-endpoint projection. This record's structural-redaction
+   requirement is therefore still unmet on `941c235`.
+2. `Request` still derives `Debug`, `Clone`, `PartialEq`, and `Eq`
+   (`crates/bitty-network-api/src/lib.rs:334`-`:335`) and still holds a `url`
+   string plus a `headers` vector of `(name, value)` pairs, either of which can
+   carry a credential. `WebSocketRequest` is the same
+   (`api/src/lib.rs:463`-`:464`, `url` plus `protocols`), and its `url` is
+   demonstrably credential-capable because the backend's own target parser
+   accepts and strips userinfo from it
+   (`crates/bitty-network/src/websocket.rs:991`-`:1003`, exercised by
+   `target_parses_ipv6_userinfo_and_port` at `websocket.rs:1455`-`:1457`).
+   `Response` also derives `Debug` and `PartialEq` and carries a `headers`
+   vector (`api/src/lib.rs:432`-`:440`). The API crate change in the
+   integration branch (`bf3bb46`, CTX-0040) touched only `NetworkError`
+   documents and added the `CountBudget` variant; it changed no derive on any
+   request or response type. The integration branch does not replace the API
+   request derives.
+3. `NetworkError` still derives `Debug` and `PartialEq`
+   (`api/src/lib.rs:262`-`:263`) and its `Denied` variant still carries a raw
+   `domain: String` that both `Debug` and `Display` echo
+   (`api/src/lib.rs:293`). It has no third-party source chain today, because
+   `impl std::error::Error for NetworkError {}` (`api/src/lib.rs:308`) declares
+   no `source`, so the source-chain requirement is satisfied vacuously rather
+   than by a redaction boundary. That is not a safe basis for a future
+   authenticated-proxy error type that does carry sources.
+
+The integration branch also adds a `diagnostics` module
+(`77dae1d`, CTX-0014, `crates/bitty-network/src/diagnostics.rs`) that
+constructs redacted snapshots rather than redacting later:
+`redacted_url` (`:49`), `redacted_headers` (`:132`), `summarize_body` (`:141`),
+`connect_authority` (`:150`), and `DiagnosticRequest` (`:159`). These satisfy
+the structural-redaction shape this record requires. They are, however, wired
+into nothing: no caller outside `diagnostics.rs` itself references
+`redacted_url`, `redacted_headers`, `summarize_body`, `connect_authority`,
+`safe_host`, or `DiagnosticRequest` on `941c235`, and the module's own header
+states that wiring them into the backends' error paths is a follow-up merge
+(`diagnostics.rs:12`-`:14`). An unwired helper is not a control on any request
+path.
+
+PR #43 is open and unmerged. Its head is an ancestor of `941c235`, so the
+content described above reached the integration branch through CTX-0040 and
+CTX-0041 rather than through PR #43, and it is still not on `origin/main`.
 
 Any type that can hold or reference proxy credential material must implement a
 hand-written redacting `Debug`; deriving `Debug` on that type is prohibited.
@@ -390,8 +494,14 @@ Serialization failure messages must be redacted too.
 `PartialEq` and `Eq` are permitted only when the same type has a hand-written
 redacted `Debug` and its fields do not expose secrets through comparison
 failures. The current `Request` and `WebSocketRequest` derives do not meet this
-gate. Tests deliberately trigger a failed equality assertion in a child process
-and prove that captured output contains neither a raw URL nor a header canary.
+gate, and they do not meet it on either baseline: the derives are unchanged
+between the merged mainline `de77e17` and the integration branch `941c235`
+(`crates/bitty-network-api/src/lib.rs:334`-`:335` and `:463`-`:464`). The serde
+ban above is satisfied on `941c235` only vacuously, because neither crate
+depends on `serde`. Tests deliberately trigger a failed equality assertion in a
+child process and prove that captured output contains neither a raw URL nor a
+header canary; no such test exists on `941c235`, because no credential-bearing
+type with a derived `Debug` exists there to format.
 
 ### Errors, panics, and third-party sources
 
@@ -443,50 +553,153 @@ Snapshot fixtures contain only redacted data, and snapshot updates fail closed
 when raw credential-capable data is present.
 
 The current tests interpolate raw observed proxy request text into assertion
-messages, including the HTTP absolute-form request and the WebSocket
-`CONNECT` line. Those patterns are prohibited for authenticated proxy work and
-must be replaced by redacted structural assertions before this gate can pass.
+messages. On `941c235` the HTTP integration tests capture the first request the
+loopback probe received and print it verbatim in the failure message, including
+the HTTP absolute-form request line at the proxy
+(`crates/bitty-network/tests/http.rs:447`-`:451`) and the destination request
+line and header assertions on a followed hop
+(`crates/bitty-network/tests/http.rs:565`-`:578`); the origin-form case is the
+same pattern at `tests/http.rs:287`-`:291`. Those patterns are prohibited for
+authenticated proxy work and must be replaced by redacted structural
+assertions before this gate can pass.
+
+The WebSocket `CONNECT` line is not an instance of this on `941c235`, and this
+record does not claim it is. The WebSocket loopback proxy fixtures read the
+`CONNECT` head only to find the `\r\n\r\n` terminator and then discard it
+(`crates/bitty-network/src/websocket.rs:2188`-`:2194`); no fixture retains it and
+no assertion message interpolates it. The emitted `CONNECT` request line is
+built from `format_authority` over a resolved host and port
+(`websocket.rs:1185`-`:1186`), so it carries no credential today. That is a
+property of the current fixture, not a redacted-diagnostic control, and it does
+not satisfy this gate for an authenticated proxy that does send a credential.
 
 ## Security-corpus review note
 
 ### Reviewed baseline
 
 This design-stage review inspected issue #25, this decision, the proxy feature
-decision, the HTTP and WebSocket proxy boundaries on `origin/main` commit
-`de77e17`, environment proxy handling, credential routing and host changes,
-storage and rotation, cache lifetime, diagnostic exposure, and the open CTX-0028
-work associated with PR #43. It identified missing implementation controls and
-required future regression coverage; it did not execute absent regression
-tests or credit unmerged code as an existing control.
+decision, the HTTP and WebSocket proxy boundaries, environment proxy handling,
+credential routing and host changes, storage and rotation, cache lifetime,
+diagnostic exposure, and the lane A/B/C work collected on the integration
+branch. It identified missing implementation controls and required future
+regression coverage; it did not execute absent regression tests or credit
+unmerged code as an existing control.
 
-At `origin/main` commit `de77e17`, pre-dial proxy-URL userinfo rejection,
+The review was performed against two baselines: the merged mainline `de77e17`
+and the integration branch `941c235` (PR #44, open, `BLOCKED`,
+`REVIEW_REQUIRED`, not merged). Round one reviewed the merged mainline. Round
+two re-verified the merged mainline and independently confirmed that the named
+regressions and `.no_proxy()` were absent there. CTX-0044 rebased this record
+onto `941c235` and re-verified every control against the integration branch,
+because several controls this record requires exist only there and the earlier
+"pending PR" framing under-described them and over-described the branch as a
+single pending change.
+
+At the merged mainline `de77e17`, pre-dial proxy-URL userinfo rejection,
 fail-closed handling of unusable environment proxy configuration, and a
 hand-written redacting `Debug` are not present. `HttpNetworkService` and
 `Egress` derive `Debug` and retain `https_proxy`; `with_proxy` retains the raw
 URL; `HttpNetworkService::new` drops unusable environment configuration and
 becomes direct; `proxy_client` lacks structural userinfo rejection; the
 WebSocket path strips userinfo and proceeds to dial; no client builder calls
-`.no_proxy()`; and the named regressions are absent. PR #43 is open and
-blocked, and its related corrections remain pending rather than reviewed
-baseline controls.
+`.no_proxy()`; and the named regressions are absent.
+
+### Round-2 finding disposition
+
+Round two (PX-0081, checkpoint `01M3CFQKB2PAXM6NPRY18Y6PV0`) closed B2, B4, B5,
+B6, B8, and B10 through B16, and left B1, B3, B7, and B9 partial while raising
+four new blocking findings. Fix round CTX-0039 (commit `2d35d17`) reported all
+four closed. CTX-0044 re-read each against `941c235` and records the disposition
+below. "Closed" means the requirement is now stated unambiguously in this
+record; it does not mean any control is implemented, because none of these
+findings has an implementation on either baseline.
+
+| Finding                                                         | Was      | Requirement now stated at                                              | Disposition                                                          |
+| --------------------------------------------------------------- | -------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| B1 redirect ownership                                           | partial  | "Redirects, proxy responses, and `CONNECT`", steps 1-5                 | closed                                                               |
+| B3 pool key completeness                                        | partial  | "Pool ownership, checkout, and invalidation"; criterion 7              | closed                                                               |
+| B7 remote revocation                                            | partial  | "Rotation, leases, and remote revocation", step 3                      | closed                                                               |
+| B9 serialization shape                                          | partial  | "Serialization and equality"; criterion 12                             | closed                                                               |
+| N1 header stripping on either origin change                     | blocking | step 5 of the redirect list and the paragraph after it; criterion 5    | closed as a requirement; **unimplemented in code on both baselines** |
+| N2 pool key uniqueness including credential-record identity     | blocking | the five-field pool key, the non-uniqueness paragraph, and criterion 7 | closed                                                               |
+| N3 no-flatten, no-arbitrary-map serialization rule              | blocking | "Serialization and equality"; criterion 12                             | closed                                                               |
+| N4 remote revocation terminating already-authenticated sessions | blocking | step 3 of the rotation list; criterion 10                              | closed                                                               |
+
+Each of N1 through N4 also appears as an explicit row in
+[Control inventory](#control-inventory) with its code-level state, so a reader
+cannot mistake a closed requirement for an implemented control.
+
+### Control inventory
+
+Every row below was read out of the working tree at `941c235`, not inferred
+from a pull request description or a task report. "Providing commit" is the
+commit on the integration branch that introduces the cited code.
+"Merge status" states whether a consumer can obtain that code today. No row in
+this table is merged; `941c235` is open under PR #44. Absence of a row means
+the control is absent from both baselines and is a requirement of this record,
+not a claim about existing code.
+
+| Control                                                                                                                                                 | State on `941c235`                              | Providing commit                                                                                                           | Merge status     | Location                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Hand-written redacting `Debug` for `HttpNetworkService`                                                                                                 | present                                         | `833b31e` (CTX-0027)                                                                                                       | unmerged, PR #44 | `crates/bitty-network/src/http.rs:217`-`:225`                                                                                                                                                                                                                                                    |
+| `Egress` has neither a `Debug` derive nor a `Debug` impl                                                                                                | present                                         | `833b31e` (CTX-0027)                                                                                                       | unmerged, PR #44 | `http.rs:298`-`:304`                                                                                                                                                                                                                                                                             |
+| `Egress` no longer retains an `https_proxy` field                                                                                                       | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `http.rs:235`-`:240`, `:298`-`:304`                                                                                                                                                                                                                                                              |
+| `ALL_PROXY` read alongside `HTTP_PROXY` and `HTTPS_PROXY`                                                                                               | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `http.rs:136`, `:139`, `:142`; used `:257`, `:260`, `:263`                                                                                                                                                                                                                                       |
+| `with_proxy` returns a typed failure before retaining or dialing                                                                                        | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `http.rs:243`-`:254`, `:347`-`:353`; test `http.rs:1050`-`:1059`                                                                                                                                                                                                                                 |
+| `proxy_url_has_credentials` structural userinfo predicate                                                                                               | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `http.rs:798`-`:805`                                                                                                                                                                                                                                                                             |
+| `validated_proxy_url` rejects userinfo before any `Proxy::all` or `.proxy()`, on the explicit path and on the environment path                          | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `http.rs:807`-`:812`, `:820`-`:834`, `:243`-`:265`                                                                                                                                                                                                                                               |
+| Fail closed on unusable environment configuration, with no direct fallback                                                                              | present                                         | `833b31e` (CTX-0027), `9fc413e` (CTX-0028)                                                                                 | unmerged, PR #44 | `http.rs:311`-`:323`, `:355`-`:359`, called from `:774` and `:785`                                                                                                                                                                                                                               |
+| Credential-bearing environment proxy URL rejected before retention, with child-process canary coverage                                                  | present                                         | `9fc413e` (CTX-0028)                                                                                                       | unmerged, PR #44 | `crates/bitty-network/tests/http.rs:321`-`:352`                                                                                                                                                                                                                                                  |
+| WebSocket proxy leg rejects userinfo before dialing                                                                                                     | present                                         | `076b030` (CTX-0026)                                                                                                       | unmerged, PR #44 | `crates/bitty-network/src/websocket.rs:1007`-`:1010`, `:1177`-`:1184`; test `:2789`-`:2809`                                                                                                                                                                                                      |
+| Named regression `authenticated_proxy_is_rejected_before_dial`                                                                                          | present                                         | `076b030` (CTX-0026)                                                                                                       | unmerged, PR #44 | `crates/bitty-network/src/websocket.rs:2789`-`:2809`                                                                                                                                                                                                                                             |
+| `.no_proxy()` and `Policy::none()` on every reqwest client construction                                                                                 | present                                         | `9fc413e` (CTX-0028) for the call sites, `941c235` (CTX-0041) for the source-level pin                                     | unmerged, PR #44 | `http.rs:378`-`:388`, `:828`-`:831`, `:845`-`:849`; pin test `tests/http.rs:699`-`:726`                                                                                                                                                                                                          |
+| Redirect following disabled on every client; owned bounded hop loop                                                                                     | present                                         | `9fc413e` (CTX-0028) for `Policy::none()`, `a207005` (CTX-0012) for the loop, `941c235` (CTX-0041) for the shared deadline | unmerged, PR #44 | `http.rs:169`, `:381`, `:441`-`:491`                                                                                                                                                                                                                                                             |
+| Fixed `CONNECT` target; no target change after the tunnel opens                                                                                         | present                                         | `a6772ad` (PR #8, issue #7), `076b030` (CTX-0026)                                                                          | unmerged, PR #44 | `websocket.rs:1167`-`:1195`; target built at `:1185`                                                                                                                                                                                                                                             |
+| Sensitive-header stripping on a destination-origin change                                                                                               | present                                         | `a207005` (CTX-0012)                                                                                                       | unmerged, PR #44 | `http.rs:187`-`:188`, `:475`-`:476`, `:711`-`:717`; test `tests/http.rs:549`-`:585`                                                                                                                                                                                                              |
+| Redacted diagnostic snapshot constructors                                                                                                               | present, but wired into no caller               | `77dae1d` (CTX-0014)                                                                                                       | unmerged, PR #44 | `crates/bitty-network/src/diagnostics.rs:49`, `:132`, `:141`, `:150`, `:159`; no caller outside the module, and `diagnostics.rs:12`-`:14` defers the wiring                                                                                                                                      |
+| Named regression `credentialed_proxy_fails_closed_without_debug_secret`                                                                                 | **absent from both baselines**                  | none                                                                                                                       | not applicable   | no occurrence in the tree on `941c235`; nearest existing coverage is `explicit_credentialed_proxy_is_rejected_without_exposed_secret` at `http.rs:1050`-`:1059`                                                                                                                                  |
+| Sensitive-header stripping on a **proxy-origin-only** change (N1)                                                                                       | **absent from both baselines**                  | none                                                                                                                       | not applicable   | `http.rs:475` conditions stripping on `!same_origin(&url, &destination)`, a destination comparison with no proxy term; `same_origin` is `:689`-`:697`. The requirement is in [Redirects, proxy responses, and `CONNECT`](#redirects-proxy-responses-and-connect)                                 |
+| `with_proxy` retains a structurally sanitized endpoint rather than the caller's bytes                                                                   | **absent from both baselines**                  | none                                                                                                                       | not applicable   | `validated_proxy_url` returns `url.to_owned()` (`http.rs:811`) into `ProxyRoute.all` (`:247`); the retained value is credential-free but not parse-derived                                                                                                                                       |
+| `Request`, `WebSocketRequest`, and `Response` free of derived `Debug` and `PartialEq`                                                                   | **absent from both baselines**                  | none                                                                                                                       | not applicable   | `crates/bitty-network-api/src/lib.rs:334`-`:335`, `:463`-`:464`, `:432`-`:440`; the CTX-0040 change to that file touched only `NetworkError`                                                                                                                                                     |
+| Forbidden `Serialize`/`Deserialize` on credential-bearing types                                                                                         | **absent from both baselines, and unreachable** | none                                                                                                                       | not applicable   | neither crate depends on `serde` on `941c235`, so no type can implement a serde trait; the ban is satisfied by the dependency set, not by a redaction boundary                                                                                                                                   |
+| `ProxyCredentialProvider`, `CanonicalOrigin`, scope registry, pool key, `AuthorizationLease`, `proxy::inject_authorization`, remote-revocation evidence | **absent from both baselines**                  | none                                                                                                                       | not applicable   | none of these identifiers exists in the tree on `941c235`; `crates/bitty-network/src/proxy.rs` is a 49-line feature-gate predicate module. This record defines them                                                                                                                              |
+| Tracing attribute allowlist and static metric label schema with exemplars                                                                               | **absent from both baselines**                  | none                                                                                                                       | not applicable   | neither crate depends on `tracing` or on a metrics facade on `941c235`; there is no exporter, descriptor, or label schema to enforce or scan                                                                                                                                                     |
+| Child-process failed-`PartialEq`-assertion redaction coverage                                                                                           | **absent from both baselines**                  | none                                                                                                                       | not applicable   | `tests/http.rs:227`-`:302` runs credential cases in a child process and scans its combined stdout and stderr, but nothing on `941c235` triggers a failed equality assertion on a credential-bearing type, because no such type exists yet                                                        |
+| Environment-proxy inheritance gated on the `proxy` feature                                                                                              | **absent from both baselines**                  | none                                                                                                                       | not applicable   | `HttpNetworkService::new` calls `ProxyRoute::from_env` unconditionally (`http.rs:311`-`:323`) and `http.rs` never calls `proxy::env_proxy_enabled()` (`proxy.rs:24`-`:27`). Owned by CTX-0034 and remediated under CTX-0043; recorded here as a fact about `941c235`, not as this record's scope |
+
+The single most important consequence of this table: the integration branch
+closes the pre-dial userinfo rejection gap on both the explicit and the
+environment path, but it closes it as _permanent rejection of proxy-URL
+userinfo_. That is exactly the posture this record requires today, and it is
+not progress toward authenticated proxies. Nothing in `941c235` reads a
+credential, stores one, injects one, or revokes one.
 
 ### Findings
 
-The current pre-dial rejection requirement is necessary but not implemented as
-claimed on the reviewed baseline. The environment and API diagnostic paths are
-currently defective, while the provider/backend separation is architecturally
-sound. This design requires explicit redirect ownership, proxy-redirect
-rejection, immutable scope snapshots, complete pool keys, synchronized leases,
-close-and-wait rotation, zero-overlap remote revocation, canonical origins, and
-structural redaction across language and observability channels.
+On the merged mainline `de77e17` the pre-dial rejection requirement is
+necessary but not implemented. On the integration branch `941c235` that
+specific gap is closed for proxy-URL userinfo on both the explicit and the
+environment path, and it is closed in the direction this record requires; the
+API diagnostic path, the `with_proxy` sanitization requirement, the
+proxy-origin-only header-stripping requirement, and every provider-side control
+remain unimplemented on both baselines, while the provider/backend separation is
+architecturally sound. This design requires explicit redirect ownership,
+proxy-redirect rejection, immutable scope snapshots, complete pool keys,
+synchronized leases, close-and-wait rotation, zero-overlap remote revocation,
+canonical origins, and structural redaction across language and
+observability channels.
 
-No authenticated-proxy implementation was reviewed. There is no implementation
-evidence for provider lifecycle, wire injection, redirect interception,
-connection pooling, lease synchronization, cache eviction, tunnel
-invalidation, protocol selection, remote revocation, or diagnostic redaction.
-The design also does not authorize sending credentials over an unconfidential
-proxy hop. A separate implementation decision must select an authentication
-protocol and confidential transport. If no such transport exists,
+No authenticated-proxy implementation was reviewed, on either baseline. The
+integration branch does own a redirect loop, and that loop does re-evaluate the
+capability and the proxy decision per hop, but it performs no credential
+authorization: there is no attachment, no lease, and no scope epoch to renew, so
+it is not the redirect interception this record requires. There is likewise no
+implementation evidence for provider lifecycle, wire injection, connection
+pooling keyed by scope, lease synchronization, cache eviction, tunnel
+invalidation, protocol selection, remote revocation, or diagnostic redaction on
+any request path. The design also does not authorize sending credentials over an
+unconfidential proxy hop. A separate implementation decision must select an
+authentication protocol and confidential transport. If no such transport exists,
 authenticated proxies remain unsupported.
 
 This is a design-stage review, not an implementation review or third-party-use
@@ -499,6 +712,15 @@ future implementation is secure.
 The fail-closed rejection requirement remains in force until this decision is
 accepted, implemented, and independently reviewed. Every criterion below is
 required before any authenticated proxy path may be enabled.
+
+None of these criteria is satisfied by any baseline this record reviews.
+[Control inventory](#control-inventory) records, per criterion, the controls
+that already exist unmerged on `941c235` and the controls that exist nowhere
+yet. A criterion whose supporting tests exist only on the unmerged integration
+branch is not met, because merged, independently reviewed, credential-capable
+code is the only thing that can satisfy a transition gate. The criteria are
+stated here as requirements and are deliberately not weakened to reflect the
+partial coverage recorded in the inventory.
 
 1. Independent acceptance records this decision and updates its status.
 2. A separately scoped implementation supplies the single provider, canonical
