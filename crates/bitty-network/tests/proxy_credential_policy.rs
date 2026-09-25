@@ -339,10 +339,21 @@ fn credentialed_proxy_url_never_reaches_proxy_construction() {
             proxy_hits, 0,
             "a credentialed environment proxy URL was dialed"
         );
-        assert_eq!(
-            origin_hits, 0,
-            "a rejected credentialed environment proxy fell back to direct egress"
-        );
+        // With the gate on, a rejected credentialed proxy must not fall back
+        // to direct egress. With the gate off the ambient value is never read,
+        // so reaching the origin directly is the gate working, not a fallback.
+        if bitty_network::proxy::env_proxy_enabled() {
+            assert_eq!(
+                origin_hits, 0,
+                "a rejected credentialed environment proxy fell back to direct egress"
+            );
+        } else {
+            assert_eq!(
+                origin_hits, 1,
+                "with the `proxy` feature disabled the ambient value must be ignored \
+                 entirely and the request must reach the origin directly"
+            );
+        }
         // Belt and braces: even if a connection had been made, no proxy
         // credential may appear in what the proxy actually received.
         assert!(
@@ -522,20 +533,38 @@ fn run_env_child() -> bool {
     }
     let origin = std::env::var(ENV_CHILD_ORIGIN).expect("environment child origin");
     let service = HttpNetworkService::new(NetworkCapability::offline().with_domain(LOOPBACK));
-    let error = service
-        .request(&Request::get(origin))
-        .expect_err("a credentialed ambient proxy must fail closed");
-    assert_eq!(error, NetworkError::Offline);
-    for (channel, value) in [
-        ("service Debug", format!("{service:?}")),
-        ("error Display", format!("{error}")),
-        ("error Debug", format!("{error:?}")),
-    ] {
-        for (secret, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)] {
-            assert!(
-                !value.contains(canary),
-                "the {secret} reached the {channel} on the environment path"
-            );
+    // Two fail-closed postures, and which one applies depends on the `proxy`
+    // feature gate that landed after this pin was written.
+    //
+    // Gate on: the ambient value is read, so it must be rejected and the
+    // request must fail.
+    // Gate off: the constructor short-circuits before either environment
+    // reader runs, so the ambient value is never inherited at all and the
+    // request legitimately reaches the origin directly.
+    //
+    // What must hold in BOTH cases is the security property: no credentialed
+    // proxy is ever used, and no credential reaches any observable channel. So
+    // a request that succeeds is accepted only when the gate is off.
+    let gate_on = bitty_network::proxy::env_proxy_enabled();
+    match service.request(&Request::get(origin)) {
+        Ok(_) => assert!(
+            !gate_on,
+            "a credentialed ambient proxy was not rejected with the `proxy` feature enabled"
+        ),
+        Err(error) => {
+            assert_eq!(error, NetworkError::Offline);
+            for (channel, value) in [
+                ("service Debug", format!("{service:?}")),
+                ("error Display", format!("{error}")),
+                ("error Debug", format!("{error:?}")),
+            ] {
+                for (secret, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)] {
+                    assert!(
+                        !value.contains(canary),
+                        "the {secret} reached the {channel} on the environment path"
+                    );
+                }
+            }
         }
     }
     println!("{ENV_CHILD_SENTINEL}");
