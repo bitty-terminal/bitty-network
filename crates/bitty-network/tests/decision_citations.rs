@@ -31,8 +31,18 @@
 //! else containing `::` is a Rust path in prose (`Self::read`,
 //! `HttpNetworkService::with_proxy`) and is skipped. A citation must also name
 //! a full repository-relative path, so a mistyped or abbreviated locator is
-//! rejected rather than quietly skipped — the unsound path this pin exists to
-//! close.
+//! rejected rather than quietly skipped.
+//!
+//! Two limits are review-held rather than enforced here, and both are stated at
+//! the record's citation form. A locator that is split across two backticked
+//! spans, written without backticks, or given a path that is neither `.rs` or
+//! `.toml` nor `tree` is skipped before the check above can fire, and an
+//! `[absent]` anchor proves only that the named text is absent from the named
+//! file, not that the file is the one the claim is about and not that the anchor
+//! is the whole identifier, so a misspelled anchor or one redirected to an
+//! unrelated file passes: this pin closes the stale-locator failure for
+//! well-formed locators, and the property pins carry the claims that must fail
+//! on behaviour.
 //!
 //! Nothing in this file may quote a string the record cites as absent, because
 //! this file is itself one of the sources the `tree` pseudo-path ranges over.

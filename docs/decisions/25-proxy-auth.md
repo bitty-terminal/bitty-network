@@ -366,7 +366,7 @@ rejects proxy-URL userinfo before `Proxy::all` (`:820`-`:834`); the WebSocket
 proxy leg rejects userinfo before dialing (see
 [Control inventory](#control-inventory)); and every client builder calls
 `.no_proxy()` and `Policy::none()` (`:378`-`:386`, `:828`-`:831`,
-`:845`-`:849`). These are unmerged and available to no consumer, and they are
+`:846`-`:848`). These are unmerged and available to no consumer, and they are
 pinned as properties rather than asserted as facts; see
 [Executable property pins](#executable-property-pins). The requirement in the
 first paragraph of this section is **[specified, not implemented]** in its
@@ -586,11 +586,14 @@ implemented]**:
 1. `with_proxy` does not retain a structurally sanitized endpoint.
    `validated_proxy_url` returns `url.to_owned()` (`http.rs:807`-`:812`), and
    `ProxyRoute::explicit` stores that verbatim string in `ProxyRoute.all`
-   (`:243`-`:254`). The retained value is now guaranteed credential-free and
-   parseable, because the retention happens behind the userinfo and parse
-   checks, but it is still the caller's exact bytes rather than a
-   parse-into-sanitized-endpoint projection. This record's structural-redaction
-   requirement is therefore still unmet on the base pin.
+   (`:243`-`:254`). On the base pin the retained value is credential-free and
+   parseable, because the store sits behind the userinfo and parse checks — an
+   ordering held by review rather than by a pin, since `proxy_client` re-runs
+   the same predicate and reports the same `NetworkError::Offline`, so an
+   `explicit` that stored the caller's bytes and skipped the validator would
+   leave the whole suite green. It is still the caller's exact bytes rather than
+   a parse-into-sanitized-endpoint projection. This record's
+   structural-redaction requirement is therefore still unmet on the base pin.
 2. `Request` still derives `Debug`, `Clone`, `PartialEq`, and `Eq`
    (`crates/bitty-network-api/src/lib.rs:334`-`:335`) and still holds a `url`
    string plus a `headers` vector of `(name, value)` pairs, either of which can
@@ -599,7 +602,7 @@ implemented]**:
    demonstrably credential-capable because the backend's own target parser
    accepts and strips userinfo from it
    (`crates/bitty-network/src/websocket.rs:991`-`:1005`, exercised by
-   `target_parses_ipv6_userinfo_and_port` at `websocket.rs:1455`-`:1457`).
+   `target_parses_ipv6_userinfo_and_port` at `websocket.rs:1455`-`:1463`).
    `Response` also derives `Debug` and `PartialEq` and carries a `headers`
    vector (`api/src/lib.rs:432`-`:440`). The API crate's only change on the
    integration line is the `CountBudget` variant, added by `076b030` (CTX-0026)
@@ -679,7 +682,7 @@ credential-capable types, and it is pinned in both directions by
 `api_vocabulary_types_still_derive_debug_and_equality_and_still_leak` so that it
 cannot be quietly resolved without this record being revisited. The
 child-process failed-`PartialEq` redaction test required above does not exist on
-the base pin: the credential cases at `tests/http.rs:321`-`:352` run in a child
+the base pin: the credential cases at `tests/http.rs:321`-`:353` run in a child
 process and scan its combined output, but nothing there triggers a failed
 equality assertion on a credential-bearing type, because no backend formats one.
 
@@ -890,9 +893,17 @@ later review rounds kept finding: a rename or an insertion silently invalidates
 them while leaving the claim looking intact, and nothing noticed. A symbol
 citation fails loudly on a rename instead, and
 `every_citation_in_the_record_names_a_symbol_that_exists` checks every one of
-them mechanically, so a wrong symbol name cannot survive a suite run. The
-prose elsewhere in this record still cites line numbers for narrative
-pointers; those are verified at review and are not part of that check.
+them mechanically, so a wrong symbol name cannot survive a suite run — provided
+the locator is one backticked span whose path ends in `.rs` or `.toml` or is the
+pseudo-path `tree`, since a locator split across two spans, written without
+backticks, or naming any other kind of path is skipped instead of checked. An
+`[absent]` anchor likewise proves only that the named text is absent from the
+named file, not that the file is the one its claim is about and not that the
+anchor is the whole identifier, so a misspelled anchor or one redirected to an
+unrelated file passes; both limits are review-held, and the claims that must
+fail on behaviour are carried by the property pins. The prose elsewhere in this
+record still cites line numbers for narrative pointers; those are verified at
+review and are not part of that check.
 
 This table deliberately carries no per-control "providing commit" column. A
 per-control commit attribution cannot self-maintain: the commit graph moves on
@@ -910,7 +921,7 @@ rather than a document when a control regresses.
 | `ALL_PROXY` read alongside `HTTP_PROXY` and `HTTPS_PROXY`                                                                                               | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::const HTTP_PROXY_VARS`; `crates/bitty-network/src/http.rs::const HTTPS_PROXY_VARS`; `crates/bitty-network/src/http.rs::const ALL_PROXY_VARS`; `crates/bitty-network/src/http.rs::fn from_env() -> Result<Self, NetworkError> {`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `with_proxy` returns a typed failure before retaining or dialing                                                                                        | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::pub fn with_proxy(`; `crates/bitty-network/src/http.rs::fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {`; `crates/bitty-network/src/http.rs::fn explicit_credentialed_proxy_is_rejected_without_exposed_secret() {`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `proxy_url_has_credentials` structural userinfo predicate                                                                                               | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::fn proxy_url_has_credentials(url: &str) -> bool {`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `validated_proxy_url` rejects userinfo before any `Proxy::all` or `.proxy()`, on the explicit path and on the environment path                          | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::fn validated_proxy_url(`; `crates/bitty-network/src/http.rs::fn proxy_client(url: &str) -> Option<reqwest::blocking::Client> {`; `crates/bitty-network/src/http.rs::fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {`; `crates/bitty-network/src/http.rs::fn from_env() -> Result<Self, NetworkError> {`                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `validated_proxy_url` rejects proxy-URL userinfo before any `Proxy::all` or `.proxy()`, on the explicit path and on the environment path                          | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::fn validated_proxy_url(`; `crates/bitty-network/src/http.rs::fn proxy_client(url: &str) -> Option<reqwest::blocking::Client> {`; `crates/bitty-network/src/http.rs::fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {`; `crates/bitty-network/src/http.rs::fn from_env() -> Result<Self, NetworkError> {`                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Fail closed on unusable environment configuration, with no direct fallback                                                                              | present                           | unmerged, PR #44 | `crates/bitty-network/src/http.rs::pub fn new(capability: NetworkCapability) -> Self {`; `crates/bitty-network/src/http.rs::fn ensure_proxy_usable(&self) -> Result<(), NetworkError> {`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Credential-bearing environment proxy URL rejected before retention, with child-process canary coverage                                                  | present                           | unmerged, PR #44 | `crates/bitty-network/tests/http.rs::fn ambient_proxy_environment_is_explicit_and_credential_safe() {`; `crates/bitty-network/tests/http.rs::fn run_proxy_child_process(`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | WebSocket proxy leg rejects userinfo before dialing                                                                                                     | present                           | unmerged, PR #44 | `crates/bitty-network/src/websocket.rs::fn tunnel_via_proxy(`; `crates/bitty-network/src/websocket.rs::fn parse_authority(authority: &str, default_port: u16)`; `crates/bitty-network/src/websocket.rs::fn authenticated_proxy_is_rejected_before_dial() {`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -950,7 +961,7 @@ one of these fails the suite, so it cannot invalidate this document unnoticed.
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `http_network_service_debug_is_hand_written_and_cannot_emit_a_credential` | `HttpNetworkService` has a hand-written redacting `Debug` — no `Debug` derive on the type — and `format!("{service:?}")` of a proxy-configured service emits no proxy URL, host, port, user, or password                                                                                                                                                                  | the hand-written-`Debug` row, and the claim that the service's `Debug` cannot emit a credential                                                                                                                                             |
 | `api_vocabulary_types_still_derive_debug_and_equality_and_still_leak`     | `Request`, `WebSocketRequest`, and `Response` still derive `Debug` and `PartialEq`, **and** the derived `Debug` still emits a header value, a URL userinfo, and a subprotocol                                                                                                                                                                                             | the `Request`/`WebSocketRequest`/`Response` derives row, and the open item that the derives are an unmitigated leak. Fails in both directions: removing a derive breaks the build, and adding a redacting `Debug` fails the leak assertions |
-| `credentialed_proxy_url_never_reaches_proxy_construction`                 | no credential-bearing proxy URL reaches `Proxy::all` or `.proxy()`, on the explicit path (five userinfo shapes, each rejected with a typed failure before retention and before dialing) and on the environment path (a child process per variable, requiring a closed failure, no canary on any observable channel, and zero hits on both the origin and the proxy probe) | the predicate, the explicit-path rejection, and the environment-path rejection rows, including the requirement that a credential-free proxy URL is still accepted                                                                           |
+| `credentialed_proxy_url_never_reaches_proxy_construction`                 | no credential-bearing proxy URL reaches `Proxy::all` or `.proxy()` or a built client, on the explicit path (six userinfo shapes, each refused with a typed failure, a live proxy listener that records no connection, and a credential-free proxy URL that must still be accepted) and on the environment path (a child process per variable, requiring a closed failure, no canary on any observable channel, and zero hits on both the origin and the proxy probe) | the predicate, the explicit-path rejection, and the environment-path rejection rows, including the requirement that a credential-free proxy URL is still accepted                                                                           |
 | `every_citation_in_the_record_names_a_symbol_that_exists`                 | every `path::anchor` citation in this record resolves: the file exists, the anchor occurs in it, and an `[absent]` anchor occurs nowhere in it, or in any Rust source under `crates/` when the path is the `tree` pseudo-path                                                                                                                                             | the whole `Location` column of the [Control inventory](#control-inventory), and with it the failure mode that kept making the line-number citations wrong: a stale pointer no longer survives a suite run                           |
 
 Each pin is mutation-checked: the property was broken in a scratch copy and the
@@ -965,15 +976,33 @@ record: a bare `tree` locator carrying no anchor, and an `[absent] https_proxy`
 anchor that was too strong, because the environment-variable spelling of that
 name still exists in `http.rs` and is not the field the row is about.
 
+The explicit-path half of the credential pin is pinned as an outcome, not as an
+ordering. `ProxyRoute::explicit` calls `validated_proxy_url` and then
+`proxy_client`, and `proxy_client` re-runs the same predicate and reports the
+same `NetworkError::Offline`, so an `explicit` that stored the caller's bytes
+directly and skipped the validator altogether would pass this pin unchanged.
+That costs no credential protection on the base pin, because the validator and
+`proxy_client`'s own guard are one predicate — userinfo, then parseability — so
+the order between them decides nothing about credentials. What the order does
+decide, that the store into `ProxyRoute.all` sits behind the validator, is a
+reading of `ProxyRoute::explicit` and is held by review, not by a pin. The
+environment-path half is the half that pins an ordering, because
+`proxy_route_client` there has no userinfo check of its own. The predicate's
+reach beyond the six tested shapes is likewise a reading of
+`proxy_url_has_credentials`, which rejects an `@` anywhere in the authority
+whatever the port is; the six shapes are its behavioural evidence, not its
+definition.
+
 The pins are scoped to the [base pin](#base-pin-and-how-to-read-this-record)
 like the inventory. If the base moves, re-read the inventory and re-run the
 pins; if a pin fails, treat it as a control regression and fix the code or this
 record in the same change, never by deleting the assertion.
 
-The citation pin deliberately checks only that the cited symbol exists. It does
-not check that the symbol still says what this record claims about it, and it
-cannot: the claims that carry weight are the property pins above, which fail on
-behaviour. What the citation pin removes is the specific failure the record
+The citation pin deliberately checks only that a locator it can classify names
+a symbol that exists, and the two limits on that are stated with the citation
+form above. It does not check that the symbol still says what this record claims
+about it, and it cannot: the claims that carry weight are the property pins
+above, which fail on behaviour. What the citation pin removes is the specific failure the record
 kept hitting, where a cited name or line quietly stopped pointing at the thing
 it was cited for while the sentence around it stayed true-looking. It is also
 deliberately not a check on the prose markers in this record. A `grep`-shaped

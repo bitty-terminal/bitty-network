@@ -218,10 +218,12 @@ fn api_vocabulary_types_still_derive_debug_and_equality_and_still_leak() {
 /// source and scope snapshots": a credential-bearing proxy URL never reaches
 /// `Proxy::all` or `.proxy()`, on the explicit path or the environment path.
 ///
-/// The explicit half asserts the typed rejection, asserts that a loopback
+/// The explicit half asserts the typed refusal, asserts that a loopback
 /// proxy listener receives nothing, and refuses to be satisfied by refusing
 /// every URL: a credential-free proxy URL must still be retained, so the
-/// predicate cannot be neutered by always answering "yes".
+/// predicate cannot be neutered by always answering "yes". It pins the outcome
+/// and not the ordering of the guards inside `ProxyRoute::explicit`; the
+/// comment at that call site records why, and the record states it.
 ///
 /// The environment half runs in a child process, because proxy environment
 /// variables are process-global. The child inherits a credentialed proxy URL,
@@ -240,8 +242,21 @@ fn credentialed_proxy_url_never_reaches_proxy_construction() {
     );
 
     // Explicit path. Plain userinfo, a bare user, percent-encoded userinfo, a
-    // schemeless authority, and an `https` proxy scheme are all
-    // credential-bearing and all rejected before retention.
+    // schemeless authority, a portless authority, and an `https` proxy scheme
+    // are all credential-bearing, and each is refused with a typed failure that
+    // returns no service, so no route is retained. The portless shape is what
+    // keeps the predicate honest: every other shape still contains a colon, in
+    // the userinfo or in the port, so a predicate narrowed to require one would
+    // pass all five of them and let this one through.
+    //
+    // What this half deliberately does not pin is *which* guard refused. On the
+    // base pin `ProxyRoute::explicit` calls `validated_proxy_url` and then
+    // `proxy_client`, and `proxy_client` re-runs the same predicate and reports
+    // the same `NetworkError::Offline`, so an `explicit` that stored the
+    // caller's bytes directly and skipped the validator would leave this test
+    // green. Asserting the ordering as well would pin a text pattern rather than
+    // a security property, so the ordering is review-held; the record states
+    // that at its pin table.
     let rejected = [
         format!("http://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_PROXY_HOST}:{CANARY_PROXY_PORT}/"),
         format!("http://{CANARY_USER}@{CANARY_PROXY_HOST}:{CANARY_PROXY_PORT}/"),
@@ -250,12 +265,13 @@ fn credentialed_proxy_url_never_reaches_proxy_construction() {
         ),
         format!("{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_PROXY_HOST}:{CANARY_PROXY_PORT}"),
         format!("https://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_PROXY_HOST}/"),
+        format!("http://{CANARY_USER}@{CANARY_PROXY_HOST}/"),
     ];
     for proxy_url in &rejected {
         assert_eq!(
             HttpNetworkService::with_proxy(NetworkCapability::offline(), proxy_url).err(),
             Some(NetworkError::Offline),
-            "a credential-bearing proxy URL must be rejected before retention"
+            "a credential-bearing proxy URL must be refused, leaving no route retained"
         );
     }
 
@@ -273,7 +289,7 @@ fn credentialed_proxy_url_never_reaches_proxy_construction() {
         )
         .err(),
         Some(NetworkError::Offline),
-        "a credentialed proxy URL must be rejected before any client is built"
+        "a credentialed proxy URL naming a live proxy must be refused without dialing it"
     );
     assert_eq!(
         probe.hits(),
