@@ -235,15 +235,19 @@ unconfigured client constructor bypassing them — is pinned by
 `every_client_builder_disables_ambient_proxy_and_redirects` in
 `crates/bitty-network/tests/http.rs`.
 
-Two of the pins assert a gap on purpose. The pin named
-`proxy_gate_is_a_predicate_without_construction_wiring` records that the `proxy`
-gate is a merged predicate which `HttpNetworkService::new` does not consult at
-this base, so construction reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
-`NO_PROXY` unconditionally; that assertion is expected to fail when CTX-0034's
-call-site wiring lands, at which point this record is re-verified. The other
-pins the absence of a bundled root store (`webpki-roots`) in the resolved
-graph, because one appearing would silently change the trust model the
-additive-roots rules above depend on.
+One pin asserts a gap on purpose: the absence of a bundled root store
+(`webpki-roots`) in the resolved graph, because one appearing would silently
+change the trust model the additive-roots rules above depend on.
+
+The pin that previously recorded the `proxy` gate as an unconsulted predicate
+has been **inverted**. When CTX-0034's call-site wiring landed, the deficiency
+assertion fired by design and the record was re-verified against the new state.
+`proxy_gate_is_consulted_before_any_environment_read` now pins the stronger
+property in the other direction: `HttpNetworkService::new` consults the gate
+**and** short-circuits before either environment reader runs, so a build
+without `proxy` reads no proxy variable at all rather than reading one and
+discarding it. That is a better property than the deficiency it replaced, and
+it is the one that actually withholds the authority.
 
 CTX-0034's unmerged work rebased onto this base and dropped its own duplicate
 `.no_proxy()` insertions as redundant, so the reconciliation is a completed
@@ -263,9 +267,10 @@ event rather than a pending one: at this base there is exactly one
 - The merged lane-D decisions: client-only construction (#26), the deferred
   credential gate (#28), explicit proxy handling (#29), and the unchanged QUIC
   and bridge boundaries (#27 and #30). Decision #29 is merged as a predicate
-  and its tests only; its `HttpNetworkService::new` call-site wiring is
-  unmerged and absent at this base, which
-  `proxy_gate_is_a_predicate_without_construction_wiring` pins.
+  and its tests; its `HttpNetworkService::new` call-site wiring has since
+  landed as well, so the gate is now consulted and short-circuits before any
+  environment read, which
+  `proxy_gate_is_consulted_before_any_environment_read` pins.
 - The CTX-0028 proxy-credential and derived-`Debug` proposal, whose controls
   are present at this base, are carried by open PRs #43 and #44, and are
   absent from the `origin/main` (`de77e17`) baseline.

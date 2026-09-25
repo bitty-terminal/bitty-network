@@ -588,7 +588,7 @@ fn no_key_bearing_type_can_derive_serde() {
 /// unconditionally. Both halves are pinned, so the record's statement about
 /// the gap cannot quietly become true or quietly stop being true.
 #[test]
-fn proxy_gate_is_a_predicate_without_construction_wiring() {
+fn proxy_gate_is_consulted_before_any_environment_read() {
     assert_eq!(
         bitty_network::proxy::env_proxy_enabled(),
         cfg!(feature = "proxy"),
@@ -599,12 +599,29 @@ fn proxy_gate_is_a_predicate_without_construction_wiring() {
         "cfg!(feature = \"proxy\")",
         "the gate is decided by the feature alone",
     );
-    forbid(
-        &function_body(HTTP_SOURCE, "pub fn new(capability: NetworkCapability)"),
+    let new = function_body(HTTP_SOURCE, "pub fn new(capability: NetworkCapability)");
+    require(
+        &new,
         "env_proxy_enabled",
-        "at this base `new` does not consult the gate predicate; when the call-site \
-         wiring lands this assertion fails and the record must be re-verified",
+        "the constructor consults the gate predicate",
     );
+    // The gate must short-circuit *before* either environment reader runs, so
+    // a build without `proxy` reads no proxy variable at all rather than
+    // discarding one after reading it.
+    let gate = new
+        .find("env_proxy_enabled")
+        .expect("the gate is consulted above");
+    for reader in ["no_proxy_from_env()", "ProxyRoute::from_env()"] {
+        let at = new
+            .find(reader)
+            .unwrap_or_else(|| panic!("{reader} must still be called on the gated path"));
+        assert!(
+            gate < at,
+            "the gate is consulted at offset {gate} but {reader} runs at {at}; \
+             the gate must short-circuit before any environment read, otherwise a \
+             build without `proxy` reads a proxy variable and only then discards it"
+        );
+    }
 }
 
 // --- Credential handling (HTTP backend) -----------------------------------
