@@ -4,8 +4,11 @@
 //! network, no hardcoded ports. Coverage: plain round-trip through the
 //! shared client, loopback bypass of an environment proxy, timeout
 //! fail-closed with typed [`NetworkError::Timeout`], capability-denied
-//! requests never touching a socket, explicit-proxy routing, and
-//! fail-closed WebSocket.
+//! requests never touching a socket, explicit-proxy routing,
+//! fail-closed WebSocket, and redirect re-authorization (issue #37):
+//! same-origin hops followed with headers intact, cross-origin hops
+//! stripped of sensitive headers, denied second hops never sent, and
+//! redirect loops stopped at the hop limit.
 //!
 //! [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
 
@@ -21,6 +24,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use bitty_network::http::MAX_REDIRECT_HOPS;
 use bitty_network::{
     HttpNetworkService, NetworkCapability, NetworkError, NetworkService, Request, WebSocketRequest,
 };
@@ -34,6 +38,7 @@ struct Probe {
     port: u16,
     hits: Arc<AtomicUsize>,
     first_request: Arc<Mutex<Option<String>>>,
+    all_requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -45,9 +50,11 @@ impl Probe {
         let port = listener.local_addr().expect("probe port").port();
         let hits = Arc::new(AtomicUsize::new(0));
         let first_request = Arc::new(Mutex::new(None::<String>));
+        let all_requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_hits = Arc::clone(&hits);
         let thread_first = Arc::clone(&first_request);
+        let thread_all = Arc::clone(&all_requests);
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
@@ -67,6 +74,9 @@ impl Probe {
                                 *guard = Some(head.clone());
                             }
                         }
+                        if let Ok(mut guard) = thread_all.lock() {
+                            guard.push(head.clone());
+                        }
                         let response = handler(&head);
                         if let Ok(mut stream) = stream.try_clone() {
                             let _ = stream.write_all(&response);
@@ -84,6 +94,7 @@ impl Probe {
             port,
             hits,
             first_request,
+            all_requests,
             stop,
             handle: Some(handle),
         }
@@ -102,6 +113,15 @@ impl Probe {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Every request head seen so far, in arrival order (redirect tests
+    /// assert per-hop forwarding from this).
+    fn requests(&self) -> Vec<String> {
+        self.all_requests
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     fn stop_and_join(mut self) {
@@ -305,4 +325,140 @@ fn websocket_denied_never_sends() {
             domain: "other.example".to_owned()
         })
     );
+}
+
+/// Bare `302` response to `location` with an empty body.
+fn redirect_response(location: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Same-origin redirect is followed with headers intact (issue #37).
+///
+/// One probe serves `/start` as a root-relative redirect to `/final`;
+/// the second hop must carry the caller's `Authorization` header because
+/// the origin did not change.
+#[test]
+fn same_origin_redirect_is_followed_with_headers() {
+    let probe = Probe::start(|head| {
+        if head.starts_with("GET /start ") {
+            redirect_response("/final")
+        } else {
+            ok_response(b"arrived")
+        }
+    });
+    let service = allow_loopback();
+
+    let response = service
+        .request(&Request::get(probe.url("/start")).with_header("Authorization", "Bearer loopback"))
+        .expect("same-origin redirect is followed");
+
+    assert_eq!(response.body, b"arrived");
+    let seen = probe.requests();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen[1].starts_with("GET /final "),
+        "second hop hits the destination, got: {:?}",
+        seen[1]
+    );
+    assert!(
+        seen[1]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer loopback"),
+        "same-origin hop forwards credentials, got: {:?}",
+        seen[1]
+    );
+
+    probe.stop_and_join();
+}
+
+/// Cross-origin redirect strips sensitive headers (issue #37).
+///
+/// The redirector points at a second probe on another port (a different
+/// origin); the followed hop must arrive without `Authorization` or
+/// `Cookie`.
+#[test]
+fn cross_origin_redirect_strips_sensitive_headers() {
+    let origin = Probe::start(|_| ok_response(b"cross"));
+    let origin_url = origin.url("/landed");
+    let redirector = Probe::start(move |_| redirect_response(&origin_url));
+    let service = allow_loopback();
+
+    let response = service
+        .request(
+            &Request::get(redirector.url("/start"))
+                .with_header("Authorization", "Bearer loopback")
+                .with_header("Cookie", "session=1"),
+        )
+        .expect("allowed cross-origin redirect is followed");
+
+    assert_eq!(response.body, b"cross");
+    assert_eq!(origin.hits(), 1);
+    let seen = origin.first_request().expect("destination saw the hop");
+    assert!(
+        seen.starts_with("GET /landed "),
+        "hop lands on the destination path, got: {seen:?}"
+    );
+    let lowered = seen.to_ascii_lowercase();
+    assert!(
+        !lowered.contains("authorization:"),
+        "authorization stripped cross-origin, got: {seen:?}"
+    );
+    assert!(
+        !lowered.contains("cookie:"),
+        "cookie stripped cross-origin, got: {seen:?}"
+    );
+
+    redirector.stop_and_join();
+    origin.stop_and_join();
+}
+
+/// A redirect hop outside the capability is denied and never sent
+/// (issue #37).
+///
+/// The grant covers only the redirector's port, so the hop to the second
+/// probe's port fails with the typed denial and the destination sees zero
+/// connections.
+#[test]
+fn denied_second_hop_never_sends() {
+    let origin = Probe::start(|_| ok_response(b"must not send"));
+    let origin_url = origin.url("/landed");
+    let redirector = Probe::start(move |_| redirect_response(&origin_url));
+    let capped = HttpNetworkService::new(
+        NetworkCapability::offline().with_domain_ports("127.0.0.1", [redirector.port]),
+    );
+
+    assert_eq!(
+        capped.request(&Request::get(redirector.url("/start"))),
+        Err(NetworkError::Denied {
+            domain: "127.0.0.1".to_owned()
+        })
+    );
+
+    assert_eq!(redirector.hits(), 1);
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(origin.hits(), 0);
+
+    redirector.stop_and_join();
+    origin.stop_and_join();
+}
+
+/// A redirect loop stops at the hop limit and fails closed (issue #37).
+///
+/// The probe redirects to itself forever; the client sends the first hop
+/// plus [`MAX_REDIRECT_HOPS`] follow-ups, then reports unreachable.
+#[test]
+fn redirect_loop_stops_at_hop_limit() {
+    let probe = Probe::start(|_| redirect_response("/loop"));
+    let service = allow_loopback();
+
+    assert_eq!(
+        service.request(&Request::get(probe.url("/loop"))),
+        Err(NetworkError::Offline)
+    );
+    assert_eq!(probe.hits(), MAX_REDIRECT_HOPS + 1);
+
+    probe.stop_and_join();
 }
