@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment-proxy inheritance with explicit proxies always-on (`#29`),
   BN-6 bridge move criteria and shape with embedded as the only backend
   (`#30`), and oauth deferral with the bitty-ai owners (`#28`).
+- Direction decision for PAC evaluation (`#24`): explicit unsupported,
+  fail-closed posture with no platform lookup or embedded JavaScript, and
+  explicit proxy precedence.
 
 ### Changed
 
