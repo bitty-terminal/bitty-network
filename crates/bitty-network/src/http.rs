@@ -41,7 +41,9 @@
 //! direct egress. Credential-bearing URLs are never retained or logged.
 //!
 //! Timeouts: [`DEFAULT_REQUEST_TIMEOUT`] bounds every request unless the
-//! caller overrides it per request. An expired deadline always surfaces
+//! caller overrides it per request. The bound covers the whole exchange,
+//! followed redirect hops included, so a chain of slow hops cannot multiply
+//! the caller's budget. An expired deadline always surfaces
 //! [`NetworkError::Timeout`], including when the proxy or the origin stalls.
 //!
 //! Budgets: every response body is capped at [`DEFAULT_MAX_BODY_BYTES`]
@@ -72,8 +74,9 @@
 //! preserve the method and body. Headers listed in
 //! [`STRIPPED_CROSS_ORIGIN_HEADERS`] are dropped when the hop crosses
 //! origins (scheme, host, or port differ) and forwarded otherwise. The proxy
-//! decision is re-evaluated per hop, and every hop shares the effective
-//! per-request deadline.
+//! decision is re-evaluated per hop, and the whole chain shares one effective
+//! deadline: each hop is sent with the time still left on
+//! [`Request::timeout`], never with a fresh one.
 //!
 //! Out of scope (issue #4): TLS custom CA (rustls platform verifier trusts
 //! the native root store as-is) and pooling tuning (reqwest defaults).
@@ -106,7 +109,7 @@
 //! ```
 
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitty_network_api::{
     HttpMethod, NetworkCapability, NetworkError, NetworkService, Request, Response,
@@ -430,8 +433,14 @@ impl HttpNetworkService {
     /// proxy decision is re-evaluated per destination, and the response body
     /// is read only once the terminal response arrives, under the effective
     /// budget from [`effective_body_limit`].
+    ///
+    /// The whole chain shares one effective deadline: each hop is sent with
+    /// the time still left on it ([`time_left`]), so a chain of slow hops
+    /// cannot multiply the caller's budget. A spent or exhausted deadline
+    /// fails closed as [`NetworkError::Timeout`] before the next hop is sent.
     fn send(&self, request: &Request) -> Result<Response, NetworkError> {
         let timeout = request.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
+        let started = Instant::now();
         let budget = effective_body_limit(request.max_body_bytes);
         let mut method = request.method;
         let mut url = request.url.clone();
@@ -449,7 +458,7 @@ impl HttpNetworkService {
             };
             self.capability.check_request(&hop)?;
             let (status, hop_headers, incoming) =
-                self.send_single(method, &url, &headers, &body, timeout)?;
+                self.send_single(method, &url, &headers, &body, started, timeout)?;
             let location = hop_headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("location"))
@@ -487,6 +496,12 @@ impl HttpNetworkService {
 
     /// Send exactly one hop: no redirect following, no body read.
     ///
+    /// `started` and `after` are the request's single effective deadline: the
+    /// chain measures elapsed time from `started`, and this hop (with its body
+    /// read) is bounded by what is left of `after`, never exceeding it. A
+    /// spent deadline fails closed as [`NetworkError::Timeout`] before any
+    /// socket work.
+    ///
     /// Returns the status, the response headers, and the open response so
     /// the caller either follows the `Location` (dropping the body
     /// unread) or materializes it under budget.
@@ -496,8 +511,10 @@ impl HttpNetworkService {
         url: &str,
         headers: &[(String, String)],
         body: &[u8],
-        timeout: Duration,
+        started: Instant,
+        after: Duration,
     ) -> Result<HopResponse, NetworkError> {
+        let remaining = time_left(started, after)?;
         let outgoing_method = match method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
@@ -511,7 +528,7 @@ impl HttpNetworkService {
         let client = self.client_for(url, &host).ok_or(NetworkError::Offline)?;
         let mut outgoing = client
             .request(outgoing_method, url.to_owned())
-            .timeout(timeout);
+            .timeout(remaining);
         for (name, value) in headers {
             let name = match HeaderName::from_bytes(name.as_bytes()) {
                 Ok(name) => name,
@@ -528,7 +545,7 @@ impl HttpNetworkService {
         }
         let incoming = match outgoing.send() {
             Ok(incoming) => incoming,
-            Err(error) => return Err(classify_transport(&error, timeout)),
+            Err(error) => return Err(classify_transport(&error, after)),
         };
         let status = incoming.status().as_u16();
         let mut hop_headers = Vec::new();
@@ -551,6 +568,20 @@ fn effective_body_limit(caller: Option<u64>) -> u64 {
         Some(limit) => limit.min(DEFAULT_MAX_BODY_BYTES),
         None => DEFAULT_MAX_BODY_BYTES,
     }
+}
+
+/// Time still left on one request's effective deadline `after`, measured from
+/// the moment the request started.
+///
+/// Checked subtraction keeps the per-hop bound at or below the caller's
+/// budget while the chain as a whole can never exceed it. A spent deadline
+/// (or a remainder too small to hand a hop) fails closed as
+/// [`NetworkError::Timeout`] carrying `after`, the deadline that expired.
+fn time_left(started: Instant, after: Duration) -> Result<Duration, NetworkError> {
+    after
+        .checked_sub(started.elapsed())
+        .filter(|left| !left.is_zero())
+        .ok_or(NetworkError::Timeout { after })
 }
 
 /// Materialize one terminal response body under `limit`.

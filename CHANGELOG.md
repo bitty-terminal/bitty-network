@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each fragmented WebSocket message at its first data frame. Child-process
   waits remain bounded, secret scanning precedes success assertions, and DNS
   saturation reports a typed timeout at the full permit capacity.
+- CTX-0041 makes the documented redirect deadline real: a followed hop chain
+  now shares one effective per-request deadline instead of resetting the
+  timeout per hop, so slow hops cannot multiply the caller's budget. A
+  source-level regression test pins `.no_proxy()` on every reqwest client
+  (inert while the pinned reqwest omits `system-proxy`), and
+  `Request::max_body_bytes` no longer documents `None` as "no cap".
 - Capability-first enforcement is the trust boundary: no ambient network
   access exists anywhere in the crate graph; the default `bitty` binary stays
   network-free and this runtime enters only when a network-capable consumer

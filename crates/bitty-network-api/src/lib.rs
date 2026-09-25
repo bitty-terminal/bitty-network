@@ -347,7 +347,9 @@ pub struct Request {
     ///
     /// Enforced fail-closed by backends that move bytes: a response larger
     /// than the cap yields [`NetworkError::Budget`] instead of a truncated
-    /// body. `None` (the default) means no cap.
+    /// body. `None` (the default) means the caller sets no explicit cap, so
+    /// the backend's mandatory ceiling applies; a `Some` value may narrow
+    /// that ceiling but never widens it.
     pub max_body_bytes: Option<u64>,
 }
 
@@ -394,7 +396,8 @@ impl Request {
 
     /// Set the response body cap in bytes (builder style).
     ///
-    /// See [`Request::max_body_bytes`]; `None` is the default (no cap).
+    /// See [`Request::max_body_bytes`]; `None` is the default (no explicit
+    /// caller cap, so the backend ceiling applies).
     #[must_use]
     pub fn with_max_body_bytes(mut self, limit_bytes: u64) -> Self {
         self.max_body_bytes = Some(limit_bytes);

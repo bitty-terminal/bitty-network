@@ -8,7 +8,11 @@
 //! socket, explicit-proxy routing, fail-closed WebSocket, and redirect
 //! re-authorization (issue #37): same-origin hops followed with headers
 //! intact, cross-origin hops stripped of sensitive headers, denied second
-//! hops never sent, and redirect loops stopped at the hop limit.
+//! hops never sent, redirect loops stopped at the hop limit, and a hop chain
+//! bounded by the caller's single deadline. The egress controls on every
+//! reqwest client are pinned by a source-level assertion, because the
+//! ambient system-proxy control they carry is inert under the pinned
+//! reqwest feature set.
 //!
 //! [`NetworkError::Timeout`]: bitty_network_api::NetworkError::Timeout
 
@@ -623,4 +627,101 @@ fn redirect_loop_stops_at_hop_limit() {
     assert_eq!(probe.hits(), MAX_REDIRECT_HOPS + 1);
 
     probe.stop_and_join();
+}
+
+/// Hops the shared-deadline chain below is built to need.
+const CHAIN_HOPS: usize = 3;
+/// Delay each hop of that chain spends before answering.
+const CHAIN_HOP_DELAY: Duration = Duration::from_millis(550);
+/// Caller deadline for the chain: under two hop delays, so the second hop
+/// cannot finish even though every single hop stays inside its own budget.
+const CHAIN_DEADLINE: Duration = Duration::from_millis(800);
+/// Wall-clock ceiling for the chain: the shared deadline stops it near
+/// [`CHAIN_DEADLINE`], while a per-hop reset needs three hop delays.
+const CHAIN_ELAPSED_CEILING: Duration = Duration::from_millis(1300);
+
+/// A redirect chain shares one request deadline.
+///
+/// The probe answers every hop only after [`CHAIN_HOP_DELAY`], so a
+/// per-hop timeout reset would let all [`CHAIN_HOPS`] hops finish and the
+/// request succeed after three delays. The shared deadline must instead
+/// fail closed with the caller's deadline, having sent one hop fewer.
+#[test]
+fn redirect_chain_shares_one_request_deadline() {
+    let served = Arc::new(AtomicUsize::new(0));
+    let hop_count = Arc::clone(&served);
+    let probe = Probe::start(move |head| {
+        thread::sleep(CHAIN_HOP_DELAY);
+        let hop = hop_count.fetch_add(1, Ordering::SeqCst);
+        if head.starts_with("GET /final ") || hop + 1 == CHAIN_HOPS {
+            ok_response(b"arrived")
+        } else {
+            redirect_response(&format!("/hop{hop}"))
+        }
+    });
+    let service = allow_loopback();
+
+    let started = Instant::now();
+    let error = service
+        .request(&Request::get(probe.url("/start")).with_timeout(CHAIN_DEADLINE))
+        .expect_err("a slow hop chain must not outlive the request deadline");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        error,
+        NetworkError::Timeout {
+            after: CHAIN_DEADLINE
+        }
+    );
+    assert_eq!(
+        probe.hits(),
+        CHAIN_HOPS - 1,
+        "the chain must stop at the deadline, not run every hop"
+    );
+    assert!(
+        elapsed < CHAIN_ELAPSED_CEILING,
+        "the chain consumed {elapsed:?}, over the {CHAIN_ELAPSED_CEILING:?} bound"
+    );
+
+    probe.stop_and_join();
+}
+
+/// Every reqwest client in the crate carries the egress controls.
+///
+/// The pinned reqwest build omits its `system-proxy` feature, so
+/// `.no_proxy()` has no observable runtime effect here and no behavioural
+/// test can fail when it is dropped. This source-level assertion pins the
+/// control instead: `http.rs` is the only module that builds clients, and
+/// every `Client::builder()` chain in it must disable ambient proxy
+/// discovery and redirect following, with no unconfigured client
+/// constructor to bypass them.
+#[test]
+fn every_client_builder_disables_ambient_proxy_and_redirects() {
+    let source = include_str!("../src/http.rs");
+    let mut rest = source;
+    let mut builders = 0;
+    while let Some(start) = rest.find("Client::builder()") {
+        builders += 1;
+        let chain = &rest[start..];
+        let end = chain
+            .find(".build()")
+            .expect("every client builder chain ends in .build()");
+        let calls = &chain[..end];
+        assert!(
+            calls.contains(".no_proxy()"),
+            "client builder {builders} omits .no_proxy()"
+        );
+        assert!(
+            calls.contains("Policy::none()"),
+            "client builder {builders} omits Policy::none()"
+        );
+        rest = &chain[end..];
+    }
+    assert!(builders > 0, "no client builder chain found in http.rs");
+    for constructor in ["Client::new()", "Client::default()", "ClientBuilder::new()"] {
+        assert!(
+            !source.contains(constructor),
+            "unconfigured client construction {constructor} bypasses the egress controls"
+        );
+    }
 }
