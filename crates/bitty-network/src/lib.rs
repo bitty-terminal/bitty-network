@@ -8,7 +8,8 @@
 //! [`protocol`], [`tls`], [`dns`], and [`policy`]. [`offline`] serves the
 //! trait with a capability-first, fail-closed backend (no sockets);
 //! [`http`] serves it with a shared-client HTTP backend (capability-first,
-//! proxy from the environment, per-request timeouts) and, with `websocket`,
+//! explicit proxy override plus environment-proxy inheritance behind the
+//! `proxy` feature, per-request timeouts) and, with `websocket`,
 //! with a capability-gated handshake returning an open socket. The
 //! remaining modules hold the offline-first shell vocabulary plus the
 //! connection-hardening helpers: [`transport`] (bounded `CONNECT` splits),
