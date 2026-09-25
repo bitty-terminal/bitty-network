@@ -3,14 +3,19 @@
 Status: decided at design stage; implementation and third-party use remain
 gated (CTX-0031).
 
-Base described by this record: branch `integrate/lanes-abc` at commit
-`941c235` ([CTX-0041]), the parent of the commit that adds this file.
-`origin/main` is `de77e17` and does **not** contain that base, so every
-current-state statement below describes `941c235` and not `origin/main`;
-readers must not carry these statements onto `origin/main` without
-re-verifying them. The full control inventory with per-control providing
-commit and merge status is in "Verified baseline and control provenance"
-below.
+Base pin: ref `integrate/lanes-abc` at commit `941c235` ([CTX-0041]), the
+parent of the commit that adds this file. Every current-state statement in this
+record is scoped to that ref-plus-commit pair and describes `941c235`, not
+`origin/main` (`de77e17`), which does not contain it; readers must not carry
+these statements onto `origin/main` without re-verifying them. The source tree
+on this branch is identical to that base: the branch adds only this record and
+the test file named below.
+
+**Scoping rule.** Current-state claims hold at the pinned base and nowhere
+else. When the base moves, they must be re-verified before being relied on
+again. Nothing in this record keeps them true automatically; the property pins
+below exist so that a moved base fails the build instead of quietly
+invalidating a document.
 
 Parent: #14 (unified TLS provider slice; custom CA and client identity).
 
@@ -18,9 +23,9 @@ Parent: #14 (unified TLS provider slice; custom CA and client identity).
 
 Define one future TLS-provider vocabulary for both HTTP and WebSocket. This
 record fixes the trust, identity-selection, storage, and redaction contracts;
-it does not define or implement a `TlsConfig` type. At the base described
-above, `tls.rs` is only a sealed marker (inventory entry 1): it has no policy
-type, certificate data, crypto, or I/O.
+it does not define or implement a `TlsConfig` type. At the pinned base,
+`src/tls.rs` is only a sealed marker: it has no policy type, certificate data,
+crypto, or I/O.
 
 ## CA-bundle vocabulary and trust model
 
@@ -73,7 +78,19 @@ decision that records the narrower trust model and its compatibility impact.
 
 When the CA source is unset, the provider performs no bundle read or PEM
 parse, installs no custom root, and uses the native roots exactly as the
-backends do at the base described above (inventory entries 1 and 9). HTTP and
+backends use them at the pinned base. Those native roots are supplied by the
+two transport stacks, not by this crate's own TLS module: the HTTP backend
+gets them from reqwest `=0.13.5` with `default-features = false` and features
+`["blocking", "rustls"]`, whose rustls-platform-verifier path reads the
+platform root store (arrived with the HTTP backend in `08dd525`, verified at
+the pinned base); the WebSocket backend gets them from tungstenite's
+`rustls-tls-native-roots` feature. The resolved graph carries
+`rustls-native-certs` and `rustls-platform-verifier` and carries no
+`webpki-roots` bundle store, so on the native targets this crate is built and
+tested for (Linux, macOS, Windows) the trust anchors are the platform's. The
+only bundled CA source anywhere in that verifier tree is wasm32-only, and this
+crate is a blocking-socket runtime that is not built for wasm32. `src/tls.rs`
+provides no trust behavior at all and is not part of either path. HTTP and
 WebSocket receive the same native trust configuration, and all existing
 hostname and certificate verification remains in force. This is the default
 and preserves that behavior.
@@ -157,15 +174,14 @@ implementation. Deriving `Debug` on a type containing a key source is
 prohibited. The safe form may expose source-kind and selection metadata, but
 not raw paths, bytes, PEM, passphrases, or credential-bearing values.
 
-At the verified baseline (`integrate/lanes-abc` `941c235`), the
-credential-facing controls this record depends on are attributed in
-"Verified baseline and control provenance" below. The short form: the
-redacting `Debug` and the credential-URL rejection come from `9fc413e`
-(CTX-0028), which is an ancestor of `941c235` but **not** of `origin/main`
-(`de77e17`) and is therefore pending code-owner approval on open PR #44
-(also on PR #43). CTX-0028's redaction controls are present at this base and
-absent from `origin/main`; they are not relied on by this record. The TLS
-implementation must provide equivalent controls and prove them
+At the pinned base the credential-facing controls this record leans on are
+present but not on the default branch: the hand-written redacting `Debug` for
+`HttpNetworkService` and the credential-bearing proxy-URL rejection arrived
+with CTX-0028 (`9fc413e`, verified at the pinned base), which is an ancestor of
+`941c235` and **not** of `origin/main` (`de77e17`) and is pending
+code-owner approval on open PR #44 (also on PR #43). Those controls are
+therefore absent from the `origin/main` baseline, and this record does not rely
+on them. The TLS implementation must provide equivalent controls and prove them
 independently, whether or not PR #44 merges.
 
 Before implementation review, canary coverage must generate a unique in-memory
@@ -175,129 +191,90 @@ test-artifact representations. The resulting text and bytes must contain
 neither the canary nor equivalent raw key material; a derived or transitive
 serializer that emits a key is a test failure.
 
-## Verified baseline and control provenance
+## How this record's current-state claims are verified
 
-This section is the single place where a control is paired with the commit
-or task that provides it and with its merge status. A control that appears
-anywhere in this record without an entry here is unverified and must be
-re-established before it is relied on.
+Every current-state claim in this record was verified at the pinned base
+against the properties in `crates/bitty-network/tests/tls_baseline_properties.rs`
+(`just check`, `just check-http`, and `just check-websocket` all run them). A
+claim with no pin behind it is unverified and must be re-established before it
+is relied on. The pins are deliberately properties of behavior, manifests, and
+the resolved dependency graph, not of commit identity: they keep holding when
+the graph is rebased or merged, and they fail the moment a change breaks the
+property a sentence depends on. A change that legitimately moves a base
+statement is expected to break a pin on purpose, so the record is re-read
+instead of drifting.
 
-Base: `integrate/lanes-abc` at `941c235` ([CTX-0041]). `origin/main` is
-`de77e17` ([CTX-0015], merged as PR #40) and does not contain `941c235`; PR
-#44 is open and awaiting a code-owner approval only the repository owner can
-grant. `f51240a` (CTX-0034) is on `ctx-0034/fix-proxy-feature-gate` only: it
-is an ancestor of neither `941c235` nor `origin/main` and has no PR.
+The transport-level egress control this record leans on — every reqwest client
+builder disabling ambient system-proxy discovery and redirect following, and no
+unconfigured client constructor bypassing them — is pinned by
+`every_client_builder_disables_ambient_proxy_and_redirects` in
+`crates/bitty-network/tests/http.rs`.
 
-Each entry names the control, the commit or task that provides it, that
-commit's merge status, and the control's presence at `941c235` and at
-`de77e17`. Line numbers are `crates/bitty-network/src/http.rs` line numbers
-in the commit named by the entry, unless another path is given.
+Two of the pins assert a gap on purpose. The pin named
+`proxy_gate_is_a_predicate_without_construction_wiring` records that the `proxy`
+gate is a merged predicate which `HttpNetworkService::new` does not consult at
+this base, so construction reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+`NO_PROXY` unconditionally; that assertion is expected to fail when CTX-0034's
+call-site wiring lands, at which point this record is re-verified. The other
+pins the absence of a bundled root store (`webpki-roots`) in the resolved
+graph, because one appearing would silently change the trust model the
+additive-roots rules above depend on.
 
-1. **TLS is a sealed marker** — no policy type, certificate data, crypto, or
-   I/O. Provided by `a3c06f2` (shell transplant, PR #1); `src/tls.rs` is
-   byte-identical at `de77e17` and `941c235`. Merged. Present at both, as a
-   marker.
-2. **Derived `Debug` on `HttpNetworkService` and `Egress`**, with
-   `Egress.https_proxy: Option<String>` holding the accepted proxy URL.
-   Provided by `de77e17` at `:123` and `:134`. Merged into `origin/main`.
-   Absent at `941c235`; present at `de77e17`.
-3. **Hand-written redacting `Debug` for `HttpNetworkService`** at `:217`, with
-   `Egress` carrying `#[derive(Clone)]` only at `:299`. Provided by `9fc413e`
-   (CTX-0028). An ancestor of `941c235` and of the `ctx-0013` head, so it is
-   carried by open PRs #43 and #44; **not** an ancestor of `origin/main`.
-   Present at `941c235`; absent at `de77e17`.
-4. **Credential-bearing proxy URL rejection**, `proxy_url_has_credentials` at
-   `:798`. Provided by `9fc413e` (CTX-0028). Merge status as entry 3. Present
-   at `941c235`; absent at `de77e17` and absent at `f51240a`.
-5. **reqwest system-proxy discovery disabled** — `.no_proxy()` on every client
-   builder: `client_with` at `:380`, `proxy_client` at `:829`, and
-   `proxy_route_client` at `:847`. Provided by `9fc413e` (CTX-0028), which
-   carries its own `.no_proxy()` pair at its `http.rs:297` and `http.rs:541`.
-   Merge status as entry 3. Present at `941c235` at all three sites; absent at
-   `de77e17`, which has no `.no_proxy()` call anywhere.
-6. **A second, independent `.no_proxy()` implementation** at `:218` and
-   `:447`, written independently of entry 5 and not derived from it, together
-   with the `env_proxy_enabled()` call-site wiring at `:155`. Provided by
-   `f51240a` (CTX-0034). **Unmerged**: no PR, and an ancestor of neither
-   `941c235` nor `origin/main`. Absent at both.
-7. **`env_proxy_enabled()` predicate and its unit tests**
-   (`src/proxy.rs:25`), the `proxy` feature annotation, and the
-   `tests/offline.rs` pin. Provided by `de77e17` (PR #40). Merged into
-   `origin/main`. Present at both refs.
-8. **Proxy feature gate applied in `HttpNetworkService::new`.** Provided by
-   `f51240a` (CTX-0034), which implements the contract that merged decision
-   #29 records but deliberately did not apply. **Unmerged**: no PR. **Absent
-   at `941c235`**, where `http.rs:315` reads `NO_PROXY`/`no_proxy` from the
-   environment unconditionally — exactly the pre-wiring state decision #29
-   states. Absent at `de77e17` as well.
-9. **WebSocket TLS via rustls with native roots and no custom CA**
-   (`src/websocket.rs:23` at `941c235`; `:20` at `de77e17`). Provided by
-   `a6772ad` (PR #8). Merged into `origin/main`. Present at both refs.
-10. **Merged lane-D decisions #26, #27, #28, #29, and #30.** Provided by
-    `de77e17` (PR #40). Merged into `origin/main`. Present at both refs.
-
-Two consequences follow, and both are load-bearing:
-
-- Entries 5 and 6 are two implementations of one control, not one control
-  recorded twice. `.no_proxy()` is present at the base only through
-  `9fc413e`. If CTX-0034 (`f51240a`) is merged later, its pair must be
-  reconciled against entry 5, and the reconciliation — not either commit
-  alone — is what an implementation review may treat as the
-  ambient-proxy-off control.
-- Entry 7 without entry 8 is the present state of the merged `#29` contract:
-  the predicate and its tests are merged, the call-site wiring is not. This
-  record relies on neither; it states the gap so no reader mistakes a merged
-  predicate for a wired gate.
+CTX-0034's unmerged work rebased onto this base and dropped its own duplicate
+`.no_proxy()` insertions as redundant, so the reconciliation is a completed
+event rather than a pending one: at this base there is exactly one
+`.no_proxy()` implementation, present on all three reqwest client builders in
+`src/http.rs`.
 
 ## Security-corpus review note
 
 ### Reviewed
 
 - Issues #21 and #22, their parent #14, and the CTX-0021 implementation scope.
-- The `tls.rs` marker and the HTTP and WebSocket native-root paths at the
-  base described above (inventory entries 1 and 9).
+- The `tls.rs` marker and both native-root paths at the pinned base: the
+  reqwest `blocking`+`rustls` stack for HTTP and the tungstenite
+  `rustls-tls-native-roots` stack for WebSocket, with no bundled root store in
+  the resolved graph.
 - The merged lane-D decisions: client-only construction (#26), the deferred
   credential gate (#28), explicit proxy handling (#29), and the unchanged QUIC
   and bridge boundaries (#27 and #30). Decision #29 is merged as a predicate
-  and its tests only (`de77e17`); its `HttpNetworkService::new` call-site
-  wiring is provided by unmerged `f51240a` (CTX-0034) and is absent at this
-  base, as inventory entries 7 and 8 record.
+  and its tests only; its `HttpNetworkService::new` call-site wiring is
+  unmerged and absent at this base, which
+  `proxy_gate_is_a_predicate_without_construction_wiring` pins.
 - The CTX-0028 proxy-credential and derived-`Debug` proposal, whose controls
-  are present at this base through `9fc413e`, are carried by open PRs #43 and
-  #44, and are absent from the `origin/main` (`de77e17`) baseline.
+  are present at this base, are carried by open PRs #43 and #44, and are
+  absent from the `origin/main` (`de77e17`) baseline.
 
 ### Findings
 
-The safe default is the one the backends already implement at this base
-(inventory entries 1 and 9): native roots and no client certificate.
-The main design risks are silent native-root replacement, partial or ignored
-CA configuration, weak or ambiguous certificate validation, an ambient client
-identity, cross-host identity reuse after a redirect or through connection
-pooling, and credential disclosure through formatting, errors, or
+The safe default is the one the two backends already implement at the pinned
+base: platform native roots and no client certificate. `src/tls.rs` contributes
+neither. The main design risks are silent native-root replacement, partial or
+ignored CA configuration, weak or ambiguous certificate validation, an ambient
+client identity, cross-host identity reuse after a redirect or through
+connection pooling, and credential disclosure through formatting, errors, or
 serialization. The decisions above make those cases explicit, fail closed,
 and independently testable.
 
 No TLS provider implementation controls were reviewed because the TLS policy
 type and implementation do not exist. The HTTP baseline was checked
-independently against `941c235`: the CTX-0028 redaction controls are present
-at that base through `9fc413e` and absent from `origin/main` (`de77e17`),
-pending code-owner approval on open PRs #43 and #44. This is a design-stage
-security-corpus review, not an implementation review and not third-party-use
-approval.
+independently against the pinned base: the CTX-0028 redaction controls are
+present there and absent from `origin/main` (`de77e17`), pending code-owner
+approval on open PRs #43 and #44. This is a design-stage security-corpus
+review, not an implementation review and not third-party-use approval.
 
 ### Gate posture
 
 CTX-0021, the consumer implementation lane, cannot start until this record
 exists on its base branch. It must implement the policy without weakening the
 capability, proxy, or typed-error contracts already decided for the backends.
-CTX-0028's redaction controls are present at the base this record describes
-and remain PENDING against `origin/main` until PR #44 lands and is
-independently verified; this record does not treat them as landed on the
-default branch, and the TLS implementation must supply and verify its own
-controls rather than assuming them. The same rule applies to CTX-0034
-(`f51240a`): its proxy feature gate call-site wiring and its second
-`.no_proxy()` pair are unmerged, so CTX-0021 must not treat the `proxy`
-feature as a wired gate on `origin/main` or on this base.
+CTX-0028's redaction controls are present at the pinned base and remain PENDING
+against `origin/main` until PR #44 lands and is independently verified; this
+record does not treat them as landed on the default branch, and the TLS
+implementation must supply and verify its own controls rather than assuming
+them. The same rule applies to CTX-0034: its `proxy` feature gate call-site
+wiring is unmerged, so CTX-0021 must not treat the `proxy` feature as a wired
+gate on `origin/main` or on this base.
 
 BN-8 remains ordered: this design review first, then CTX-0021 implementation,
 then implementation-level security review. Third-party use stays blocked until
