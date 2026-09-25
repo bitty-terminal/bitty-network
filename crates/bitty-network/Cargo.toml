@@ -51,8 +51,9 @@ websocket = ["dep:tungstenite", "http"]
 # pick, and capability-first enforcement before it lands here.
 quic = []
 # Environment-proxy inheritance opt-in (CTX-0015, issue #29): with this
-# gate backends may inherit HTTPS_PROXY/NO_PROXY; without it egress is
-# direct-only unless the caller passes an explicit proxy (always on).
+# gate backends may inherit HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and NO_PROXY
+# (including lowercase spellings); without it egress is direct-only unless
+# the caller passes an explicit proxy (always on).
 proxy = []
 # Accepted fail-closed no-op (CTX-0015, issue #28): oauth credential flow
 # is deferred to a joint design with the bitty-ai owners plus a

@@ -2,7 +2,8 @@
 //!
 //! Decided in CTX-0015 (issue #29): the `proxy` feature gates
 //! *environment-proxy inheritance* and nothing else. With the feature,
-//! backends may inherit `HTTPS_PROXY`/`NO_PROXY` from the environment;
+//! backends may inherit `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+//! `NO_PROXY` (including each lowercase spelling) from the environment;
 //! without it, the environment is ignored and egress is direct-only unless
 //! the caller passes an explicit proxy. Explicit proxies (for example
 //! [`HttpNetworkService::with_proxy`]) stay always-on in both cases:

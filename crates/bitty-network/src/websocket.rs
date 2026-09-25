@@ -134,7 +134,7 @@ pub const MAX_WS_FRAMES: u64 = 65_536;
 
 /// Largest number of data messages one socket may read.
 ///
-/// A message is counted when its final data frame arrives, so fragmented
+/// A message is counted at its first text or binary frame, so fragmented
 /// messages consume one message-budget slot while every fragment remains
 /// subject to [`MAX_WS_FRAMES`]. Exceeding the cap fails closed with
 /// [`NetworkError::CountBudget`].
@@ -170,7 +170,7 @@ const DNS_WAIT_POLL: Duration = Duration::from_millis(1);
 
 const DNS_RESOLVER_CAPACITY: usize = 32;
 #[cfg(test)]
-const HUNG_RESOLVER_COUNT: usize = 4;
+const HUNG_RESOLVER_COUNT: usize = DNS_RESOLVER_CAPACITY;
 
 type ResolverResult = std::io::Result<Vec<SocketAddr>>;
 type Resolver = Box<dyn FnOnce() -> ResolverResult + Send + 'static>;
@@ -533,6 +533,9 @@ impl<S: Write> Write for BudgetedStream<S> {
     }
 }
 
+const WS_OPCODE_TEXT: u8 = 0x1;
+const WS_OPCODE_BINARY: u8 = 0x2;
+
 #[derive(Default)]
 struct FrameCounter {
     header: Vec<u8>,
@@ -585,9 +588,8 @@ impl FrameCounter {
         if self.frames > MAX_WS_FRAMES {
             return Err(count_budget(MAX_WS_FRAMES));
         }
-        let fin = self.header[0] & 0x80 != 0;
         let opcode = self.header[0] & 0x0f;
-        if fin && opcode <= 2 {
+        if opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY {
             self.messages = self.messages.saturating_add(1);
             if self.messages > MAX_WS_MESSAGES {
                 return Err(count_budget(MAX_WS_MESSAGES));
@@ -1419,6 +1421,8 @@ where
 mod tests {
     use super::*;
 
+    static RESOLVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn target_parses_ws_and_wss_defaults() {
         let plain = parse_target("ws://example.com/socket").expect("ws parses");
@@ -1502,6 +1506,7 @@ mod tests {
 
     #[test]
     fn resolver_wait_is_bounded_without_waiting_for_completion() {
+        let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let started = Instant::now();
@@ -1527,16 +1532,19 @@ mod tests {
     const CONTROL_REPLY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]
-    fn resolver_saturation_preserves_capacity_for_healthy_lookup() {
+    fn resolver_saturation_reports_typed_timeout() {
+        let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let calls = HUNG_RESOLVER_COUNT;
         let barrier = Arc::new(std::sync::Barrier::new(calls));
         let release = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
         let mut callers = Vec::with_capacity(calls);
         for _ in 0..calls {
             let barrier = Arc::clone(&barrier);
             let release = Arc::clone(&release);
             let started_tx = started_tx.clone();
+            let done_tx = done_tx.clone();
             callers.push(std::thread::spawn(move || {
                 barrier.wait();
                 resolve_with_deadline(SILENT_READ, Instant::now(), move || {
@@ -1544,11 +1552,13 @@ mod tests {
                     while !release.load(Ordering::Acquire) {
                         std::thread::sleep(TRICKLE_INTERVAL);
                     }
+                    let _ = done_tx.send(());
                     Ok(Vec::new())
                 })
             }));
         }
         drop(started_tx);
+        drop(done_tx);
         let mut all_started = true;
         for _ in 0..calls {
             if started_rx.recv_timeout(OPERATION_DEADLINE_BOUND).is_err() {
@@ -1562,11 +1572,15 @@ mod tests {
             .collect::<Vec<_>>();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("healthy address");
         let healthy = listener.local_addr().expect("healthy address");
+        let healthy_deadline = OPERATION_DEADLINE_BOUND;
         let healthy_result =
-            resolve_with_deadline(Duration::from_secs(1), Instant::now(), move || {
-                Ok(vec![healthy])
-            });
+            resolve_with_deadline(healthy_deadline, Instant::now(), move || Ok(vec![healthy]));
         release.store(true, Ordering::Release);
+        for _ in 0..calls {
+            done_rx
+                .recv_timeout(OPERATION_DEADLINE_BOUND)
+                .expect("hung resolver did not release its permit");
+        }
         assert!(
             all_started,
             "hung resolvers did not occupy the original pool"
@@ -1576,7 +1590,12 @@ mod tests {
                 .iter()
                 .all(|result| { *result == Err(NetworkError::Timeout { after: SILENT_READ }) })
         );
-        assert_eq!(healthy_result, Ok(vec![healthy]));
+        assert_eq!(
+            healthy_result,
+            Err(NetworkError::Timeout {
+                after: healthy_deadline,
+            })
+        );
     }
 
     /// Read deadline for silent-peer fixtures.
@@ -1641,6 +1660,7 @@ mod tests {
 
     /// Open a client socket to a loopback port with no proxy.
     fn connect_loopback(port: u16) -> WebSocketSocket {
+        let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let request = WebSocketRequest::new(loopback_url(port));
         connect(&request, None).expect("loopback handshake")
     }
@@ -2490,12 +2510,42 @@ mod tests {
     }
 
     #[test]
+    fn recv_counts_fragmented_messages_at_first_data_frame() {
+        let mut frames = Vec::with_capacity((MAX_WS_MESSAGES as usize + 1) * 2);
+        for _ in 0..MAX_WS_MESSAGES as usize {
+            frames.push((false, OPCODE_TEXT, Vec::new()));
+            frames.push((true, OPCODE_CONTINUE, Vec::new()));
+        }
+        frames.push((false, OPCODE_TEXT, Vec::new()));
+        assert!(frames.len() < MAX_WS_FRAMES as usize);
+        let port = spawn_raw_server(frames);
+        let mut socket = connect_loopback(port);
+        let mut result = Ok(WsMessage::Text(String::new()));
+        for _ in 0..=MAX_WS_MESSAGES as usize {
+            match socket.recv_with_timeout(SILENT_READ) {
+                Ok(WsMessage::Text(text)) => assert!(text.is_empty()),
+                Ok(WsMessage::Binary(_)) => panic!("fragmented text became binary"),
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            result,
+            Err(NetworkError::CountBudget {
+                limit_items: MAX_WS_MESSAGES,
+            })
+        );
+    }
+
+    #[test]
     fn recv_accepts_frame_count_minus_one() {
         let mut frames = Vec::with_capacity(MAX_WS_FRAMES as usize - 1);
         frames.push((false, OPCODE_TEXT, Vec::new()));
         frames.extend(std::iter::repeat_n(
             (false, OPCODE_CONTINUE, Vec::new()),
-            MAX_WS_FRAMES as usize - 2,
+            MAX_WS_FRAMES as usize - 3,
         ));
         frames.push((true, OPCODE_CONTINUE, Vec::new()));
         let port = spawn_raw_server(frames);
@@ -2773,6 +2823,7 @@ mod tests {
 
     #[test]
     fn trickle_handshake_is_bounded_by_total_deadline() {
+        let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let mut server = spawn_trickle_handshake();
         let request = WebSocketRequest::new(loopback_url(server.port)).with_timeout(SILENT_READ);
         let started = Instant::now();
@@ -2831,6 +2882,7 @@ mod tests {
 
     #[test]
     fn http_proxy_tunnel_carries_handshake() {
+        let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let proxy = spawn_plain_proxy(1);
         let proxy_url = format!("http://127.0.0.1:{proxy}/");
         // The target port is unroutable on purpose: success proves the

@@ -540,9 +540,9 @@ fn reqwest_proxy(url: &str, scope: ProxyScope) -> Result<reqwest::Proxy, ()> {
 fn proxy_route_client(route: &ProxyRoute) -> Option<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder().no_proxy();
     for (url, scope) in [
-        (route.all.as_deref(), ProxyScope::All),
-        (route.https.as_deref(), ProxyScope::Https),
         (route.http.as_deref(), ProxyScope::Http),
+        (route.https.as_deref(), ProxyScope::Https),
+        (route.all.as_deref(), ProxyScope::All),
     ] {
         if let Some(url) = url {
             builder = builder.proxy(reqwest_proxy(url, scope).ok()?);

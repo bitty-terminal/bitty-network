@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly; credentialed values are rejected before a reqwest client or
   retained proxy state is built and never reach service errors, process output,
   or `Debug`.
+- CTX-0029 pins scheme-specific proxy precedence over `ALL_PROXY` and counts
+  each fragmented WebSocket message at its first data frame. Child-process
+  waits remain bounded, secret scanning precedes success assertions, and DNS
+  saturation reports a typed timeout at the full permit capacity.
 - Capability-first enforcement is the trust boundary: no ambient network
   access exists anywhere in the crate graph; the default `bitty` binary stays
   network-free and this runtime enters only when a network-capable consumer

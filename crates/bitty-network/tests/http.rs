@@ -14,12 +14,13 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
+use std::process::Stdio;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitty_network::{
     HttpNetworkService, NetworkCapability, NetworkError, NetworkService, Request, WebSocketRequest,
@@ -162,6 +163,8 @@ const PROXY_ENV_VARS: [&str; 6] = [
 const PROXY_BYPASS_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 const PROXY_USER_FIXTURE: &str = "fixture-user";
 const PROXY_PASSWORD_FIXTURE: &str = "fixture-pass";
+const PROXY_CHILD_WAIT: Duration = Duration::from_secs(5);
+const PROXY_CHILD_POLL: Duration = Duration::from_millis(10);
 
 fn run_proxy_child() -> bool {
     let Ok(mode) = std::env::var(PROXY_CHILD_MODE) else {
@@ -201,6 +204,7 @@ fn run_proxy_child_process(
     mode: &str,
     variable: &str,
     proxy_url: &str,
+    all_proxy_url: Option<&str>,
     origin_url: &str,
 ) -> std::process::Output {
     let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
@@ -209,7 +213,9 @@ fn run_proxy_child_process(
         .arg("--exact")
         .arg("--nocapture")
         .env(PROXY_CHILD_MODE, mode)
-        .env(PROXY_CHILD_ORIGIN, origin_url);
+        .env(PROXY_CHILD_ORIGIN, origin_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for name in PROXY_ENV_VARS {
         command.env_remove(name);
     }
@@ -217,7 +223,28 @@ fn run_proxy_child_process(
         command.env_remove(name);
     }
     command.env(variable, proxy_url);
-    command.output().expect("proxy child process")
+    if let Some(all_proxy_url) = all_proxy_url {
+        command.env("ALL_PROXY", all_proxy_url);
+    }
+    let mut child = command.spawn().expect("proxy child process");
+    let deadline = Instant::now() + PROXY_CHILD_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("proxy child process exceeded its wait bound");
+            }
+            Ok(None) => thread::sleep(PROXY_CHILD_POLL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("proxy child process wait failed: {error}");
+            }
+        }
+    }
+    child.wait_with_output().expect("proxy child output")
 }
 
 #[test]
@@ -279,7 +306,8 @@ fn ambient_proxy_environment_is_explicit_and_credential_safe() {
             "http://{PROXY_USER_FIXTURE}:{PROXY_PASSWORD_FIXTURE}@{}",
             proxy.url("/").trim_start_matches("http://")
         );
-        let output = run_proxy_child_process("credentials", variable, &proxy_url, &origin.url("/"));
+        let output =
+            run_proxy_child_process("credentials", variable, &proxy_url, None, &origin.url("/"));
         let origin_hits = origin.hits();
         let proxy_hits = proxy.hits();
         origin.stop_and_join();
@@ -289,29 +317,42 @@ fn ambient_proxy_environment_is_explicit_and_credential_safe() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.status.success(), "proxy credential child failed");
         assert!(
             !captured.contains(PROXY_USER_FIXTURE)
                 && !captured.contains(PROXY_PASSWORD_FIXTURE)
                 && !captured.contains(&proxy_url),
             "proxy credential reached child output"
         );
+        assert!(output.status.success(), "proxy credential child failed");
         assert_eq!(origin_hits, 0, "rejected proxy request reached origin");
         assert_eq!(proxy_hits, 0, "rejected proxy request reached proxy");
     }
 
     let origin = Probe::start(|_| ok_response(b"origin-must-stay-unused"));
     let proxy = Probe::start(|_| ok_response(b"via-proxy"));
-    let output = run_proxy_child_process("route", "HTTP_PROXY", &proxy.url("/"), &origin.url("/"));
+    let all_proxy = Probe::start(|_| ok_response(b"via-all"));
+    let output = run_proxy_child_process(
+        "route",
+        "HTTP_PROXY",
+        &proxy.url("/"),
+        Some(&all_proxy.url("/")),
+        &origin.url("/"),
+    );
     let origin_hits = origin.hits();
     let proxy_hits = proxy.hits();
+    let all_proxy_hits = all_proxy.hits();
     origin.stop_and_join();
     proxy.stop_and_join();
+    all_proxy.stop_and_join();
     assert!(output.status.success(), "ambient proxy route child failed");
     assert_eq!(origin_hits, 0, "ambient HTTP_PROXY was silently ignored");
     assert_eq!(
         proxy_hits, 1,
         "ambient HTTP_PROXY did not use the explicit route"
+    );
+    assert_eq!(
+        all_proxy_hits, 0,
+        "ALL_PROXY overrode the scheme-specific HTTP_PROXY"
     );
 }
 
