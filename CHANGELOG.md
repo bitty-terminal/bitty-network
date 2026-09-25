@@ -38,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   precedence. The refusal is currently silent, so the posture is not fail
   closed; fail-closed behavior is a pre-adoption requirement, not a
   current control.
+- Shared bounded DNS answer cache in the `dns` module (`bitty-network#23`),
+  with `DnsCache`, the process-wide `dns::shared()` instance, and
+  `dns::resolve_shared()` as the adoption point for a dial path. Positive and
+  negative entries, at most `DNS_CACHE_MAX_ENTRIES` (128) held, positive
+  entries servable for `DNS_CACHE_TTL` (30s) and negative ones for the
+  shorter `DNS_NEGATIVE_CACHE_TTL` (5s). The cache sits below the capability
+  check and is keyed on exactly the authorized `(normalized host, port)`
+  query, so an answer is never shared across two queries the allowlist
+  treats as different. Reuse never extends a deadline: an entry's expiry is
+  capped by the absolute deadline of the lookup that produced it, a probe
+  whose own caller deadline has already passed misses instead of serving,
+  and only the caller that received an answer inside its own deadline writes
+  one — never the detached worker whose late answer arrives after that
+  deadline was abandoned. A recorded refusal is distinguishable from an
+  absence, a timeout or cancellation is never stored, and an empty answer is
+  recorded as the negative it is. The HTTP backend still cannot share it
+  (reqwest owns its resolver internals); the WebSocket dial path adopting
+  the seam is a follow-up in the websocket lane.
 
 ### Changed
 
@@ -59,6 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The DNS cache is a new place where a resolved address is reused, so its
+  authority properties are pinned rather than assumed (`bitty-network#23`): a
+  cached answer is only reachable by a caller that already passed the
+  capability check for that same query, the key is never coarser than the
+  allowlist's `(host, port)` equivalence class, and reuse cannot turn an
+  expired deadline or a cancelled call into a free answer. The entry-count
+  bound keeps a shared cache from being a memory-growth vector reachable by
+  anyone who can make the host resolve names.
 - CTX-0028 closes the third-round WebSocket deadline and proxy-safety gaps:
   receive operations install one temporary read/write deadline for automatic
   control replies, DNS uses bounded elastic permits so caller deadlines return
