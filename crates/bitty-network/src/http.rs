@@ -138,7 +138,8 @@ pub const DEFAULT_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum followed redirects per request (5 hops).
 ///
-/// Bounds cross-origin re-authorization work while covering canonical chains
+/// Accepted default pending successor-contract ratification: bounds
+/// cross-origin re-authorization work while covering canonical chains
 /// (`http` to `https`, trailing slash, shortener — usually three or fewer).
 /// A longer chain fails closed with [`NetworkError::Offline`].
 ///
@@ -290,7 +291,11 @@ impl HttpNetworkService {
         }
         match builder.build() {
             Ok(client) => client,
-            Err(_) => reqwest::blocking::Client::new(),
+            // Fallback keeps manual redirect handling: never auto-follow.
+            Err(_) => reqwest::blocking::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
         }
     }
 
