@@ -5,13 +5,20 @@
 //! the [`DnsResolver`] seam, [`resolve_with_deadline`] (which bounds any
 //! blocking resolver with an explicit deadline and an explicit cancellation
 //! flag), and [`resolve_cached`] / [`resolve_shared`], which put one shared
-//! [`DnsCache`] in front of that seam. Wiring the dial path
-//! (`crate::websocket`'s `dial`, owned by the sibling websocket lane) through
-//! this seam is a follow-up merge — and the HTTP backend is deliberately
-//! untouched here: reqwest owns its resolver internals and exposes no hook
-//! to replace them, so the HTTP backend cannot share this cache without
-//! dropping reqwest for a hand-rolled transport. Until the dial path adopts
-//! the seam, this cache is reached only through [`resolve_shared`].
+//! [`DnsCache`] in front of that seam. Until a dial path adopts the seam this
+//! cache is reached only through [`resolve_shared`], and the two callers
+//! that have to adopt it are both owned by other lanes:
+//!
+//! * The WebSocket dial path (`crate::websocket`'s `dial`) still carries its
+//!   own private resolver and permit pool. It is the natural first adopter.
+//! * The HTTP backend resolves inside reqwest, but reqwest is not an
+//!   obstacle: the pinned reqwest exposes `ClientBuilder::dns_resolver`, so
+//!   the backend can adopt the same cache by handing reqwest a resolver that
+//!   consults [`shared()`]. That is a change in `crate::http`, not here.
+//!
+//! So "used by every backend" is a wiring state this module makes possible
+//! and does not itself reach; the cache's bounds and authority rules are
+//! properties of this module and hold for whoever adopts it.
 //!
 //! Cancellation stops the *wait*, not the in-flight lookup: a resolver
 //! blocked inside a syscall cannot be preempted without an async runtime,

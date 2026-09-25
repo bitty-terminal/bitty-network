@@ -53,9 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one — never the detached worker whose late answer arrives after that
   deadline was abandoned. A recorded refusal is distinguishable from an
   absence, a timeout or cancellation is never stored, and an empty answer is
-  recorded as the negative it is. The HTTP backend still cannot share it
-  (reqwest owns its resolver internals); the WebSocket dial path adopting
-  the seam is a follow-up in the websocket lane.
+  recorded as the negative it is. No backend is wired to it yet: the
+  WebSocket dial path still carries its own resolver and permit pool, and
+  the HTTP backend resolves inside reqwest (whose pinned
+  `ClientBuilder::dns_resolver` is the adoption hook). Both wirings are
+  changes in files this lane does not own, so the cache's bounds and
+  authority rules are what this change delivers, not a dialed answer.
 
 ### Changed
 
