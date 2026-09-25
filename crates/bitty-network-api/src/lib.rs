@@ -269,17 +269,21 @@ pub enum NetworkError {
     },
     /// The capability is deny-all (offline); no domain is reachable.
     Offline,
-    /// An allowed operation exceeded its deadline; reserved for the socket
-    /// follow-up that produces it.
+    /// An allowed operation exceeded its deadline.
     Timeout {
         /// Deadline that expired.
         after: Duration,
     },
-    /// An allowed operation would exceed its transfer budget; produced by
-    /// backends enforcing [`Request::max_body_bytes`].
+    /// An allowed operation would exceed a byte transfer budget enforced by
+    /// an HTTP response or WebSocket transport.
     Budget {
-        /// Budget that would be exceeded, in bytes.
+        /// Byte budget that would be exceeded.
         limit_bytes: u64,
+    },
+    /// An allowed operation would exceed a frame or message count budget.
+    CountBudget {
+        /// Item-count budget that would be exceeded.
+        limit_items: u64,
     },
 }
 
@@ -293,6 +297,9 @@ impl fmt::Display for NetworkError {
             }
             Self::Budget { limit_bytes } => {
                 write!(f, "network budget exceeded: {limit_bytes} bytes")
+            }
+            Self::CountBudget { limit_items } => {
+                write!(f, "network count budget exceeded: {limit_items} items")
             }
         }
     }
@@ -652,6 +659,10 @@ mod tests {
         assert_eq!(
             NetworkError::Budget { limit_bytes: 8 }.to_string(),
             "network budget exceeded: 8 bytes".to_owned()
+        );
+        assert_eq!(
+            NetworkError::CountBudget { limit_items: 3 }.to_string(),
+            "network count budget exceeded: 3 items".to_owned()
         );
     }
 

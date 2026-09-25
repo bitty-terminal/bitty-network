@@ -1,6 +1,6 @@
 [package]
 name = "bitty-network"
-description = "Bitty network implementation — embedded offline NetworkService with capability-first enforcement; sockets arrive in a follow-up"
+description = "Bitty network implementation with capability-first offline, HTTP, and WebSocket transports"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,8 +20,9 @@ bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
 # transitive pins live in the workspace Cargo.lock; license/source approval
 # lives in deny.toml. Default features are OFF on purpose: no charset, no
 # HTTP/2, no OS system-proxy magic — TLS is rustls (pure Rust, platform
-# verifier for native roots) and proxy comes from HTTPS_PROXY/NO_PROXY,
-# read explicitly in `src/http.rs` so behavior stays observable and tested.
+# verifier for native roots). Standard proxy variables and NO_PROXY are read
+# explicitly in `src/http.rs`; reqwest system-proxy discovery is disabled so
+# behavior stays observable, credential-checked, and tested.
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "rustls"], optional = true }
 # WebSocket transport slice (CTX-0004, issue #7): sync tungstenite client
 # behind the default-off `websocket` feature. Exact pin in exactly one place
@@ -50,8 +51,9 @@ websocket = ["dep:tungstenite", "http"]
 # pick, and capability-first enforcement before it lands here.
 quic = []
 # Environment-proxy inheritance opt-in (CTX-0015, issue #29): with this
-# gate backends may inherit HTTPS_PROXY/NO_PROXY; without it egress is
-# direct-only unless the caller passes an explicit proxy (always on).
+# gate backends may inherit HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and NO_PROXY
+# (including lowercase spellings); without it egress is direct-only unless
+# the caller passes an explicit proxy (always on).
 proxy = []
 # Accepted fail-closed no-op (CTX-0015, issue #28): oauth credential flow
 # is deferred to a joint design with the bitty-ai owners plus a
