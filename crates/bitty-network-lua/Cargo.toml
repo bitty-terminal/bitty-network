@@ -19,7 +19,7 @@ bitty-network = { path = "../bitty-network", version = "0.1.0", features = ["htt
 
 # Phodopus - Bitty's pure-Rust stackless Lua VM
 # Pinned to same revision as bitty/crates/bitty-lua
-phodopus = { git = "https://github.com/bitty-terminal/phodopus", rev = "1653c51f7fbda5e93fa99aefb0e5be58dfacfeb0" }
+phodopus = { version = "0.2.0-alpha.1", git = "https://github.com/bitty-terminal/phodopus", rev = "1653c51f7fbda5e93fa99aefb0e5be58dfacfeb0" }
 
 # Async runtime for host-side async suspension bridge
 tokio = { version = "1", features = ["sync", "time", "rt"] }
