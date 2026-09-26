@@ -1,0 +1,25 @@
+[package]
+name = "bitty-network-lua"
+description = "Lua FFI bindings for bitty-network with shared runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "bitty", "lua", "ffi"]
+categories = ["network-programming", "api-bindings"]
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
+bitty-network = { path = "../bitty-network", version = "0.1.0", features = ["http"] }
+
+# Lua FFI - mlua with phodopus (Bitty's Lua VM)
+# Version will be aligned with bitty/crates/bitty-lua
+mlua = { version = "0.10", features = ["lua54", "async", "send"] }
+
+# Async runtime for Promise implementation
+tokio = { version = "1", features = ["sync", "time"] }

@@ -14,3 +14,7 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Lua FFI bindings (future integration)
+# Note: Commented out until mlua version is aligned with bitty/crates/bitty-lua
+# "crates/bitty-network-lua",
