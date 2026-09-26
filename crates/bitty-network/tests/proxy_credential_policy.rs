@@ -553,7 +553,7 @@ fn run_env_child() -> bool {
         ),
         Err(error) => {
             assert_eq!(error, NetworkError::Offline);
-            for (channel, value) in [
+            for (_channel, value) in [
                 ("service Debug", format!("{service:?}")),
                 ("error Display", format!("{error}")),
                 ("error Debug", format!("{error:?}")),

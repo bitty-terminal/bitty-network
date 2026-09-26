@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Inspector feed audit vocabulary in `bitty-network-api` (`#31`): per-plugin
+  per-host audit entry types (`AuditEntry`, `AuditDecision`) and `AuditSink`
+  trait for the host to implement. Backends emit entries on every capability
+  check outcome (allow/deny) with host, port, method, timestamp, and a plugin
+  identity hook. No PII beyond host/port, bounded memory enforced by the host's
+  sink implementation. Types only in the API crate; actual backend integration
+  deferred pending host-side plugin-identity mapping.
 - Embedded offline `NetworkService` with capability-first enforcement: every
   request is checked against the caller's manifest-declared egress
   capabilities before dispatch, and anything undeclared fails closed with a
