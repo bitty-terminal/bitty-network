@@ -1,12 +1,12 @@
 [package]
 name = "bitty-network-lua"
-description = "Lua FFI bindings for bitty-network with shared runtime"
+description = "Phodopus FFI bindings for bitty-network with shared runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bitty-terminal/bitty-network"
-keywords = ["network", "bitty", "lua", "ffi"]
+keywords = ["network", "bitty", "lua", "ffi", "phodopus"]
 categories = ["network-programming", "api-bindings"]
 publish = false
 
@@ -17,9 +17,12 @@ workspace = true
 bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
 bitty-network = { path = "../bitty-network", version = "0.1.0", features = ["http"] }
 
-# Lua FFI - mlua with phodopus (Bitty's Lua VM)
-# Version will be aligned with bitty/crates/bitty-lua
-mlua = { version = "0.10", features = ["lua54", "async", "send"] }
+# Phodopus - Bitty's pure-Rust stackless Lua VM
+# Pinned to same revision as bitty/crates/bitty-lua
+phodopus = { git = "https://github.com/bitty-terminal/phodopus", rev = "1653c51f7fbda5e93fa99aefb0e5be58dfacfeb0" }
 
-# Async runtime for Promise implementation
-tokio = { version = "1", features = ["sync", "time"] }
+# Async runtime for host-side async suspension bridge
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
