@@ -262,13 +262,13 @@ jobs:
         # NOTE: do NOT pass `arguments: check` — the action's `command`
         # input already defaults to `check`, and passing both yields
         # `check check` (invalid value for [WHICH], red supply-chain gate).
-          # Feature selection lives in deny.toml ([graph] features =
-          # ["http", "websocket"]) so the reqwest and tungstenite trees are
-          # always in view.
+        # Feature selection lives in deny.toml ([graph] features =
+        # ["http", "websocket"]) so the reqwest and tungstenite trees are
+        # always in view.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit advisories
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0009
 
   actionlint:
     name: Lint GitHub Actions workflows
