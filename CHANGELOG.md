@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Feature**: Implemented Phodopus Callback integration in `bitty-network-lua`.
+  Added `callback.rs` module with `create_echo_callback()` and `create_info_callback()`
+  demonstrating how to create Lua callbacks using Phodopus API. The `echo` callback
+  mirrors string input, and `info` returns a table with runtime metadata. Both callbacks
+  are registered under `bitty.network` namespace. Includes comprehensive unit tests and
+  integration tests validating callback invocation from Lua scripts.
+
 ### Changed
 
 - **Refactor**: Extracted TLS trust and client-identity provider into new
