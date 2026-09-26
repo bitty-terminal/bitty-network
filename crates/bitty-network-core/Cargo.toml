@@ -1,0 +1,17 @@
+[package]
+name = "bitty-network-core"
+description = "Bitty network core functionality — diagnostics, policy, runtime markers, and protocol helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "bitty"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
