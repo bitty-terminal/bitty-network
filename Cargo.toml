@@ -22,6 +22,17 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# Lock ICU/zerotrie crates to versions compatible with Rust 1.85 MSRV.
+# Newer versions (zerotrie 0.2.5+, zerovec 0.11.8+) require yoke ^0.8.3,
+# which transitively pulls in yoke-derive 0.8.3 that has a compilation error
+# on Rust 1.85 (error[E0599]: no function or associated item named `from_utf8`
+# found for type `str`). These versions work on Rust 1.85.
+# Remove these constraints once yoke-derive 0.8.4+ fixes the issue.
+[workspace.dependencies]
+zerotrie = "=0.2.4"
+zerovec = "=0.11.6"
+potential_utf = "=0.1.5"
+
 # Lua FFI bindings (future integration)
 # Note: Commented out until mlua version is aligned with bitty/crates/bitty-lua
 # "crates/bitty-network-lua",

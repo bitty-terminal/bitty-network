@@ -121,12 +121,15 @@ version = "0.1.0"
 dependencies = [
  "bitty-network-api",
  "idna",
+ "potential_utf",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
  "time",
  "zeroize",
+ "zerotrie",
+ "zerovec",
 ]
 
 [[package]]
@@ -839,6 +842,8 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
+ "serde_core",
+ "writeable",
  "zerovec",
 ]
 
@@ -1213,6 +1218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1895,6 +1901,7 @@ version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
 dependencies = [
+ "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",

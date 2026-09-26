@@ -23,6 +23,12 @@ rustls-platform-verifier = { version = "=0.7.0", default-features = false }
 rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
 idna = { version = "=1.1.0" }
 zeroize = { version = "=1.9.0", features = ["alloc"] }
+# Lock ICU/zerotrie transitive dependencies to versions compatible with Rust 1.85.
+# idna -> idna_adapter -> icu_* -> zerotrie/zerovec/potential_utf. Newer versions
+# require yoke ^0.8.3 which has yoke-derive 0.8.3 compilation errors on Rust 1.85.
+zerotrie = { workspace = true }
+zerovec = { workspace = true }
+potential_utf = { workspace = true }
 
 [dev-dependencies]
 # Test-only runtime CA and key generation. Dev-only, so it never enters the
