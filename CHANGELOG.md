@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Refactor**: Extracted DNS resolution and caching into new `bitty-network-dns`
+  crate (`#56`, phase 2/7 of crate split). Moved `dns` module from `bitty-network`
+  to `bitty-network-dns`. The DNS crate is dependency-free (stdlib only) and
+  gated behind the `http` feature in `bitty-network`. `bitty-network` re-exports
+  the dns module when the http feature is enabled. Zero breaking changes to
+  external API; all existing tests pass unchanged.
 - **Refactor**: Extracted shared core functionality into new `bitty-network-core`
   crate (`#56`, phase 1/7 of crate split). Moved `diagnostics`, `policy`,
   `runtime`, and `protocol` modules from `bitty-network` to `bitty-network-core`.

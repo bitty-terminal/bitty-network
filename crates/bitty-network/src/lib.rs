@@ -53,6 +53,7 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "http")]
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bitty-network-api", "crates/bitty-network-core", "crates/bitty-network"]
+members = ["crates/bitty-network-api", "crates/bitty-network-core", "crates/bitty-network-dns", "crates/bitty-network"]
 
 [workspace.package]
 version = "0.1.0"
