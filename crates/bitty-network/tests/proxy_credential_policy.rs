@@ -558,10 +558,10 @@ fn run_env_child() -> bool {
                 ("error Display", format!("{error}")),
                 ("error Debug", format!("{error:?}")),
             ] {
-                for (secret, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)] {
+                for (field_name, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)] {
                     assert!(
                         !value.contains(canary),
-                        "the {secret} reached the {channel} on the environment path"
+                        "the {field_name} reached the {channel} on the environment path"
                     );
                 }
             }
