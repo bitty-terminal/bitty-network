@@ -46,8 +46,8 @@
 
 #![forbid(unsafe_code)]
 
-use bitty_network_api::{Request, Response, NetworkError};
-use phodopus::{Context, Table, Error};
+use bitty_network_api::{NetworkError, Request, Response};
+use phodopus::{Context, Error, Table};
 
 /// Shared network runtime singleton.
 ///
@@ -63,13 +63,12 @@ use phodopus::{Context, Table, Error};
 pub struct SharedNetworkRuntime {
     // Future: backend reference
     // backend: Arc<dyn NetworkService>,
-    
+
     // Future: capability registry
     // capabilities: Arc<CapabilityRegistry>,
-    
+
     // Future: resource limits
     // limits: Arc<ResourceLimits>,
-    
     _placeholder: (),
 }
 
@@ -85,9 +84,7 @@ impl SharedNetworkRuntime {
     /// once the Phodopus async integration is complete.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            _placeholder: (),
-        }
+        Self { _placeholder: () }
     }
 
     /// Execute a network request for a specific plugin.
@@ -159,7 +156,7 @@ pub fn register_network_module<'gc>(
     _runtime: &SharedNetworkRuntime,
 ) -> Result<(), Error<'gc>> {
     let globals = ctx.globals();
-    
+
     // Create bitty table if not exists
     let bitty = match globals.get::<_, Table>(ctx, "bitty") {
         Ok(table) => table,
@@ -169,10 +166,10 @@ pub fn register_network_module<'gc>(
             table
         }
     };
-    
+
     // Create network table (skeleton - no callbacks yet)
     let network = Table::new(&ctx);
-    
+
     // Future: Register callbacks here
     // Example:
     // let request_callback = Callback::new(&ctx, |ctx, _exec, mut stack| {
@@ -183,16 +180,16 @@ pub fn register_network_module<'gc>(
     //     Ok(CallbackReturn::Return)
     // });
     // network.set(ctx, "request", request_callback)?;
-    
+
     // Future: Register resolve callback
     // let resolve_callback = Callback::new(&ctx, |ctx, _exec, mut stack| {
     //     // Similar pattern for DNS resolution
     //     Ok(CallbackReturn::Return)
     // });
     // network.set(ctx, "resolve", resolve_callback)?;
-    
+
     bitty.set(ctx, "network", network)?;
-    
+
     Ok(())
 }
 
@@ -211,20 +208,21 @@ mod tests {
     fn test_register_network_module() {
         let mut lua = Lua::full();
         let runtime = SharedNetworkRuntime::new();
-        
+
         lua.try_enter(|ctx| {
             register_network_module(ctx, &runtime)?;
-            
+
             // Verify bitty.network table exists
             let globals = ctx.globals();
             let bitty: Table = globals.get(ctx, "bitty")?;
             let network: Table = bitty.get(ctx, "network")?;
-            
+
             // Table should exist but be empty (skeleton)
             let _ = network;
-            
+
             Ok(())
-        }).expect("registration should succeed");
+        })
+        .expect("registration should succeed");
     }
 
     #[tokio::test]
@@ -232,7 +230,7 @@ mod tests {
     async fn test_request_for_plugin_unimplemented() {
         let runtime = SharedNetworkRuntime::new();
         let request = Request::get("https://example.com");
-        
+
         let _ = runtime.request_for_plugin("test-plugin", request).await;
     }
 }

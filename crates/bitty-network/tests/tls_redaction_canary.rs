@@ -375,7 +375,10 @@ fn no_serialization_surface_exists_for_a_key_bearing_type() {
             "src/tls/provider.rs",
             include_str!("../../bitty-network-tls/src/provider.rs"),
         ),
-        ("src/tls/x509.rs", include_str!("../src/tls/x509.rs")),
+        (
+            "src/tls/x509.rs",
+            include_str!("../../bitty-network-tls/src/x509.rs"),
+        ),
     ] {
         for (line, owner, traits) in derive_owners(source) {
             for trait_name in traits {
