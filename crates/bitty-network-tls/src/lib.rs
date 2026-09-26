@@ -106,10 +106,9 @@
 //!
 //! [`PemSource`]: bitty_network_api::PemSource
 
-#[cfg(any(feature = "http", feature = "websocket"))]
-mod provider;
-#[cfg(any(feature = "http", feature = "websocket"))]
-pub use provider::{TlsProvider, TlsSelection, TlsTransport, canonical_host};
+#![forbid(unsafe_code)]
 
-#[cfg(any(feature = "http", feature = "websocket"))]
+mod provider;
+pub use provider::{canonical_host, TlsProvider, TlsSelection, TlsTransport};
+
 mod x509;

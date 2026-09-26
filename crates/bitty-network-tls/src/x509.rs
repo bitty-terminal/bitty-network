@@ -892,8 +892,8 @@ mod tests {
     use super::*;
 
     use rcgen::{
-        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-        KeyUsagePurpose, date_time_ymd,
+        date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa,
+        KeyPair, KeyUsagePurpose,
     };
     use time::OffsetDateTime;
 
@@ -1311,11 +1311,9 @@ mod tests {
             FUTURE_FROM(),
             FUTURE_UNTIL(),
         ));
-        assert!(
-            !admit_root(&future)
-                .expect("a CA certificate with keyCertSign is admitted")
-                .is_valid_at(inside_window())
-        );
+        assert!(!admit_root(&future)
+            .expect("a CA certificate with keyCertSign is admitted")
+            .is_valid_at(inside_window()));
     }
 
     /// Bytes that are not a certificate are refused, and refused the same way

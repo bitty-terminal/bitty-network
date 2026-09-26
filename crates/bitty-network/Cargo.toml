@@ -17,6 +17,7 @@ workspace = true
 bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
 bitty-network-core = { path = "../bitty-network-core", version = "0.1.0" }
 bitty-network-dns = { path = "../bitty-network-dns", version = "0.1.0", optional = true }
+bitty-network-tls = { path = "../bitty-network-tls", version = "0.1.0", optional = true }
 # First real transport (CTX-0003, issue #4): reqwest blocking client behind
 # the default-off `http` feature. Exact pin in exactly one place (here);
 # transitive pins live in the workspace Cargo.lock; license/source approval
@@ -36,45 +37,11 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["blocking
 # feature stays off: URL parsing is a few lines of best-effort splitting in
 # `src/websocket.rs`, same as `Request::host`.
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"], optional = true }
-# TLS provider (CTX-0021, issues #21/#22). The trust and client-identity
-# provider in `src/tls.rs` composes ONE rustls configuration per transport
-# and hands it to both backends, so the crate keeps exactly one TLS stack.
-# All four are already in the resolved graph through reqwest/tungstenite; they
-# are direct dependencies here because the provider names their types, and
-# that adds no new crate to the graph. Exact pins live here (in one place);
-# license/source approval lives in deny.toml.
-#
-# - rustls: the ClientConfig both backends consume. `default-features = false`
-#   plus an explicit provider (aws-lc-rs, the provider reqwest's `rustls`
-#   feature already pulls) so building a config never depends on ambient
-#   process-wide provider state and can never panic.
-# - rustls-platform-verifier: `Verifier::new_with_extra_roots` is the additive
-#   root source. It loads the platform root store and ADDS the supplied
-#   certificates to it, forwarding parse errors to the caller. It does NOT fail
-#   closed on a missing platform store once extra roots are present (0.7.0 tests
-#   `root_store.is_empty()` after adding them), so the provider proves the native
-#   load separately; that is what makes the additive-only trust model mechanical
-#   rather than a convention.
-# - rustls-pki-types: the PEM reader, certificate/key types, and `ServerName`.
-#
-# X.509 attribute parsing for construction-time root validation
-# (basicConstraints, keyUsage, the validity window, the SPKI algorithm and key
-# size, and the subject/issuer names) is a self-contained reader in
-# `src/tls/x509.rs` rather than a new dependency. It reads four fixed fields out
-# of caller-supplied public certificates and performs no signature
-# verification: every cryptographic decision, including path building, path
-# length, and name constraints, stays inside rustls/webpki. The reader is
-# covered by an exhaustive truncation sweep and per-field mutation tests.
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs"], optional = true }
-rustls-platform-verifier = { version = "=0.7.0", default-features = false, optional = true }
-rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"], optional = true }
-# Canonical-host IDNA normalization for exact client-identity selection. Already
-# in the graph through `url`; direct here because the provider normalizes both
-# the rule hosts and the destination with the same function.
-idna = { version = "=1.1.0", optional = true }
-# Zeroizing owned private-key buffers. Already in the graph through
-# rustls-pki-types; direct here because the provider owns the temporaries.
-zeroize = { version = "=1.9.0", features = ["alloc"], optional = true }
+# rustls ClientConfig type needed by reqwest's tls_backend_preconfigured.
+# The TLS provider (bitty-network-tls) composes the configuration; the HTTP
+# backend passes it to reqwest. This is the same rustls already in the graph
+# through reqwest and bitty-network-tls.
+rustls = { version = "=0.23.45", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 # Test-only runtime CA and key generation (CTX-0021, issue #21). Dev-only, so
@@ -100,12 +67,9 @@ client = []
 server = []
 http = [
   "dep:bitty-network-dns",
+  "dep:bitty-network-tls",
   "dep:reqwest",
   "dep:rustls",
-  "dep:rustls-platform-verifier",
-  "dep:rustls-pki-types",
-  "dep:idna",
-  "dep:zeroize",
 ]
 # The WebSocket handshake reuses the `http` backend (capability ownership,
 # proxy decision, service type, TLS provider), so the feature implies `http`.

@@ -56,15 +56,12 @@ dependencies = [
  "bitty-network-api",
  "bitty-network-core",
  "bitty-network-dns",
- "idna",
+ "bitty-network-tls",
  "rcgen",
  "reqwest",
  "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
  "time",
  "tungstenite",
- "zeroize",
 ]
 
 [[package]]
@@ -81,6 +78,20 @@ dependencies = [
 [[package]]
 name = "bitty-network-dns"
 version = "0.1.0"
+
+[[package]]
+name = "bitty-network-tls"
+version = "0.1.0"
+dependencies = [
+ "bitty-network-api",
+ "idna",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-platform-verifier",
+ "time",
+ "zeroize",
+]
 
 [[package]]
 name = "block-buffer"
