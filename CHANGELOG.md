@@ -122,6 +122,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     DER reader rather than a new parsing dependency. `rcgen` is a dev-dependency
     only, so tests mint their CA and keys at runtime and no certificate or key
     fixture is committed.
+- Inspector feed decision (`#31`, CTX-0023): the audit-entry vocabulary keyed
+  per plugin per host, the host-implemented sink seam, a synchronous emit point
+  with no queue in this crate, and a fail-closed rule that refuses the exchange
+  whose entry cannot be recorded. Docs only; the issue stays open and no
+  vocabulary, sink, emitter, or bound is implemented.
 
 ### Changed
 
