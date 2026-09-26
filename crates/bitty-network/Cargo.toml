@@ -37,6 +37,11 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["blocking
 # feature stays off: URL parsing is a few lines of best-effort splitting in
 # `src/websocket.rs`, same as `Request::host`.
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"], optional = true }
+# rustls ClientConfig type needed by reqwest's tls_backend_preconfigured.
+# The TLS provider (bitty-network-tls) composes the configuration; the HTTP
+# backend passes it to reqwest. This is the same rustls already in the graph
+# through reqwest and bitty-network-tls.
+rustls = { version = "=0.23.45", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 # Test-only runtime CA and key generation (CTX-0021, issue #21). Dev-only, so
@@ -64,6 +69,7 @@ http = [
   "dep:bitty-network-dns",
   "dep:bitty-network-tls",
   "dep:reqwest",
+  "dep:rustls",
 ]
 # The WebSocket handshake reuses the `http` backend (capability ownership,
 # proxy decision, service type, TLS provider), so the feature implies `http`.

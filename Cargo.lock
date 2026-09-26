@@ -59,6 +59,7 @@ dependencies = [
  "bitty-network-tls",
  "rcgen",
  "reqwest",
+ "rustls",
  "time",
  "tungstenite",
 ]
