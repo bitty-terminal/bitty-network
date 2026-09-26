@@ -207,7 +207,7 @@ fn a_bundle_does_not_restrict_native_trust_and_says_so() {
         ),
         (
             "src/tls/provider.rs",
-            include_str!("../src/tls/provider.rs"),
+            include_str!("../../bitty-network-tls/src/provider.rs"),
         ),
         ("src/tls.rs", include_str!("../src/tls.rs")),
     ] {
