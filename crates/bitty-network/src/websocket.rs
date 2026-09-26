@@ -916,8 +916,26 @@ fn ws_config() -> tungstenite::protocol::WebSocketConfig {
 pub(crate) fn connect(
     request: &WebSocketRequest,
     proxy_url: Option<&str>,
+    provider: &crate::tls::TlsProvider,
 ) -> Result<WebSocketSocket, NetworkError> {
     let target = parse_target(&request.url)?;
+    // One handshake is one new TLS destination, so the identity and trust
+    // configuration is selected here, from this target's own canonical host —
+    // never from the proxy authority, and never carried over from a previous
+    // handshake. It is selected only for a TLS target: a `ws://` handshake
+    // negotiates no certificate, so an anchor that has since expired must not
+    // refuse a plaintext connection that never consults a trust anchor.
+    let tls = if target.tls {
+        Some(
+            provider
+                .select(crate::tls::TlsTransport::WebSocket, &target.host)
+                .map_err(map_tls_failure)?
+                .config()
+                .map(tungstenite::Connector::Rustls),
+        )
+    } else {
+        None
+    };
     let deadline = request.timeout.unwrap_or(DEFAULT_WEBSOCKET_TIMEOUT);
     let started = Instant::now();
     let (stream, prefix) = match proxy_url {
@@ -929,19 +947,23 @@ pub(crate) fn connect(
         let placeholder = stream.try_clone().map_err(|_| NetworkError::Offline)?;
         let mut tls_input = BudgetedStream::new(stream, Vec::new(), false);
         tls_input.inner.interrupt_next_io();
-        let tls_stream =
-            match tungstenite::client_tls_with_config(url, tls_input, Some(ws_config()), None) {
-                Err(tungstenite::HandshakeError::Interrupted(mut stalled)) => {
-                    let stream = stalled.get_mut().get_mut();
-                    let placeholder =
-                        MaybeTlsStream::Plain(BudgetedStream::new(placeholder, Vec::new(), false));
-                    std::mem::replace(stream, placeholder)
-                }
-                Err(tungstenite::HandshakeError::Failure(error)) => {
-                    return Err(map_transport(&error, deadline));
-                }
-                Ok(_) => return Err(NetworkError::Offline),
-            };
+        let tls_stream = match tungstenite::client_tls_with_config(
+            url,
+            tls_input,
+            Some(ws_config()),
+            tls.flatten(),
+        ) {
+            Err(tungstenite::HandshakeError::Interrupted(mut stalled)) => {
+                let stream = stalled.get_mut().get_mut();
+                let placeholder =
+                    MaybeTlsStream::Plain(BudgetedStream::new(placeholder, Vec::new(), false));
+                std::mem::replace(stream, placeholder)
+            }
+            Err(tungstenite::HandshakeError::Failure(error)) => {
+                return Err(map_transport(&error, deadline));
+            }
+            Ok(_) => return Err(NetworkError::Offline),
+        };
         let outer = BudgetedStream::new(tls_stream, prefix, true);
         let (socket, _) = drive(
             tungstenite::client::client_with_config(url, outer, Some(ws_config())),
@@ -1330,6 +1352,17 @@ fn map_transport(error: &tungstenite::Error, after: Duration) -> NetworkError {
     }
 }
 
+/// Map a TLS policy refusal to its typed network error.
+///
+/// A distinct category from [`NetworkError::Offline`]: the socket may be
+/// reachable and the refusal is a trust or client-identity decision. The payload
+/// is a stable category and never carries a path, a byte, or a PEM.
+///
+/// [`NetworkError::Offline`]: bitty_network_api::NetworkError::Offline
+fn map_tls_failure(reason: bitty_network_api::TlsFailure) -> NetworkError {
+    NetworkError::Tls { reason }
+}
+
 /// Map a blocking I/O failure to its typed error (same rule as
 /// [`map_transport`]).
 fn map_io(error: &std::io::Error, after: Duration) -> NetworkError {
@@ -1662,7 +1695,8 @@ mod tests {
     fn connect_loopback(port: u16) -> WebSocketSocket {
         let _resolver_test_guard = RESOLVER_TEST_LOCK.lock().expect("resolver test lock");
         let request = WebSocketRequest::new(loopback_url(port));
-        connect(&request, None).expect("loopback handshake")
+        connect(&request, None, &crate::tls::TlsProvider::native_only())
+            .expect("loopback handshake")
     }
 
     /// Spawn a loopback echo server (default stack config, so it accepts
@@ -2828,7 +2862,7 @@ mod tests {
         let request = WebSocketRequest::new(loopback_url(server.port)).with_timeout(SILENT_READ);
         let started = Instant::now();
         assert_eq!(
-            connect(&request, None).err(),
+            connect(&request, None, &crate::tls::TlsProvider::native_only()).err(),
             Some(NetworkError::Timeout { after: SILENT_READ })
         );
         assert!(started.elapsed() < OPERATION_DEADLINE_BOUND);
@@ -2888,7 +2922,12 @@ mod tests {
         // The target port is unroutable on purpose: success proves the
         // handshake ran through the proxy tunnel, not direct.
         let request = WebSocketRequest::new(format!("ws://127.0.0.1:{}/socket", closed_port()));
-        let mut socket = connect(&request, Some(&proxy_url)).expect("tunneled handshake");
+        let mut socket = connect(
+            &request,
+            Some(&proxy_url),
+            &crate::tls::TlsProvider::native_only(),
+        )
+        .expect("tunneled handshake");
         socket
             .send(WsMessage::Text("via-proxy".to_owned()))
             .expect("send through tunnel");
