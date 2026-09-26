@@ -239,7 +239,7 @@ fn the_redacting_debug_is_hand_written_and_never_derived() {
         ),
         (
             "src/tls/provider.rs",
-            include_str!("../src/tls/provider.rs"),
+            include_str!("../../bitty-network-tls/src/provider.rs"),
         ),
     ] {
         for (line, owner, traits) in derive_owners(source) {
@@ -272,7 +272,7 @@ fn the_redacting_debug_is_hand_written_and_never_derived() {
             "{ty} must carry a hand-written redacting Debug implementation"
         );
     }
-    let provider = include_str!("../src/tls/provider.rs");
+    let provider = include_str!("../../bitty-network-tls/src/provider.rs");
     for ty in IMPL_KEY_BEARING_TYPES {
         assert!(
             provider.contains(&format!("impl fmt::Debug for {ty}")),
@@ -373,9 +373,12 @@ fn no_serialization_surface_exists_for_a_key_bearing_type() {
         ),
         (
             "src/tls/provider.rs",
-            include_str!("../src/tls/provider.rs"),
+            include_str!("../../bitty-network-tls/src/provider.rs"),
         ),
-        ("src/tls/x509.rs", include_str!("../src/tls/x509.rs")),
+        (
+            "src/tls/x509.rs",
+            include_str!("../../bitty-network-tls/src/x509.rs"),
+        ),
     ] {
         for (line, owner, traits) in derive_owners(source) {
             for trait_name in traits {
@@ -552,7 +555,7 @@ fn inline_key_bytes_have_a_zeroing_drop() {
 /// `Vec` is loud.
 #[test]
 fn key_buffers_are_zeroizing_and_read_from_one_place() {
-    let provider = include_str!("../src/tls/provider.rs");
+    let provider = include_str!("../../bitty-network-tls/src/provider.rs");
     assert!(
         provider.contains("Zeroizing<Vec<u8>>"),
         "a read PEM buffer must be zeroizing"

@@ -81,12 +81,33 @@ wildcards = "deny"
 # - base64 0.22.1 alongside 0.23.1 (rustls-pemfile vs hyper/reqwest core).
 # - syn 2.0.119 alongside syn 3.0.6 (derive-macro ecosystems in transition).
 # Skipped, not denied: unifying them is upstream's release to make.
+#
+# Duplicate versions from Phodopus git dependency (checked 2026-09-26):
+# - rand_core 0.9.5 (via phodopus) alongside 0.10.1 (via tungstenite/reqwest).
+# - rand 0.9.5 (via phodopus) alongside 0.10.3 (via tungstenite/reqwest).
+# - getrandom 0.3.4 (via phodopus rand 0.9.x) alongside 0.4.3 (via reqwest rand 0.10.x).
+# - r-efi 5.3.0 (via phodopus getrandom 0.3.x) alongside 6.0.0 (via reqwest getrandom 0.4.x).
+#   Phodopus pins rand 0.9.x ecosystem; websocket/http use rand 0.10.x ecosystem.
+#   Will unify when Phodopus updates or when published to crates.io.
 skip = [
     { crate = "base64@0.22.1", reason = "reqwest-tree dupe, upstream unification pending" },
     { crate = "syn@2.0.119", reason = "reqwest-tree dupe, upstream unification pending" },
+    { crate = "rand_core@0.9.5", reason = "phodopus git dep uses rand 0.9.x, will unify on phodopus publish" },
+    { crate = "rand@0.9.5", reason = "phodopus git dep uses rand 0.9.x, will unify on phodopus publish" },
+    { crate = "getrandom@0.3.4", reason = "phodopus git dep uses getrandom 0.3.x, will unify on phodopus publish" },
+    { crate = "r-efi@5.3.0", reason = "phodopus git dep uses r-efi 5.x, will unify on phodopus publish" },
 ]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Phodopus git dependencies (checked 2026-09-26):
+# bitty-network-lua uses phodopus (Bitty's Lua VM) from git until it publishes
+# to crates.io. Pinned to rev 1653c51f (aligned with bitty/crates/bitty-lua).
+# Phodopus itself depends on gc-arena from git (kyren/gc-arena).
+# Remove these exceptions when phodopus publishes to crates.io.
+allow-git = [
+    "https://github.com/bitty-terminal/phodopus",
+    "https://github.com/kyren/gc-arena",
+]
