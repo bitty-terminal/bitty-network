@@ -1345,11 +1345,11 @@ mod tests {
     #[test]
     fn no_truncation_of_a_real_certificate_is_accepted() {
         let certificate = good_ca();
-        for cut in 0..certificate.len() {
+        let cert_len = certificate.len();
+        for cut in 0..cert_len {
             assert!(
                 admit_root(&certificate[..cut]).is_err(),
-                "a {cut}-byte prefix of a {}-byte certificate must be refused",
-                certificate.len()
+                "a {cut}-byte prefix of a {cert_len}-byte certificate must be refused"
             );
         }
         assert!(admit_root(&certificate).is_ok());

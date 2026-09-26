@@ -101,9 +101,10 @@ fn canary_needles(key: &str) -> Vec<String> {
 /// Assert that `rendered` carries no part of `key`.
 fn assert_canary_absent(what: &str, rendered: &str, key: &str) {
     for needle in canary_needles(key) {
+        let leaked = rendered.contains(&needle);
         assert!(
-            !rendered.contains(&needle),
-            "{what} leaked key material: {needle:?} appears in {rendered:?}"
+            !leaked,
+            "{what} leaked key material: needle appears in output"
         );
     }
 }
@@ -201,14 +202,14 @@ fn debug_of_every_key_bearing_type_is_redacted() {
     for expected in ["native_only", "custom_roots", "identity_hosts", "hosts"] {
         assert!(
             rendered.contains(expected),
-            "the provider debug must still report {expected}: {rendered:?}"
+            "the provider debug must still report {expected}"
         );
     }
     let rendered = format!("{rule:?}");
     for expected in ["hosts", "chain_source", "key_source"] {
         assert!(
             rendered.contains(expected),
-            "the rule debug must still report {expected}: {rendered:?}"
+            "the rule debug must still report {expected}"
         );
     }
     assert!(
