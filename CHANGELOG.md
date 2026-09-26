@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Refactor**: Extracted shared core functionality into new `bitty-network-core`
+  crate (`#56`, phase 1/7 of crate split). Moved `diagnostics`, `policy`,
+  `runtime`, and `protocol` modules from `bitty-network` to `bitty-network-core`.
+  `bitty-network` now re-exports these modules from the core crate. Zero breaking
+  changes to external API; all existing tests pass unchanged. This establishes
+  the foundation for further modularization of the network stack.
+
 ### Added
 
 - Inspector feed audit vocabulary in `bitty-network-api` (`#31`): per-plugin

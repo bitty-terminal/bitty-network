@@ -53,19 +53,18 @@
 
 #![forbid(unsafe_code)]
 
-pub mod diagnostics;
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod offline;
-pub mod policy;
-pub mod protocol;
 pub mod proxy;
-pub mod runtime;
 pub mod tls;
 pub mod transport;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+
+// Re-export core modules from bitty-network-core
+pub use bitty_network_core::{diagnostics, policy, protocol, runtime};
 
 #[cfg(feature = "http")]
 pub use crate::http::HttpNetworkService;
