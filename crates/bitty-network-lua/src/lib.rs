@@ -167,12 +167,18 @@ pub fn register_network_module<'gc>(
         }
     };
 
-    // Create network table (skeleton - no callbacks yet)
+    // Create network table
     let network = Table::new(&ctx);
 
-    // Future: Register callbacks here
-    // Example:
-    // let request_callback = Callback::new(&ctx, |ctx, _exec, mut stack| {
+    // Register test callbacks (demonstrating Phodopus Callback integration)
+    let echo_cb = callback::create_echo_callback(&ctx);
+    let info_cb = callback::create_info_callback(&ctx);
+
+    network.set(ctx, "echo", echo_cb)?;
+    network.set(ctx, "info", info_cb)?;
+
+    // Future: Register real network operation callbacks
+    // let request_callback = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
     //     // Parse Lua args from stack
     //     // Get plugin_id from context
     //     // Call runtime.request_for_plugin()
@@ -182,7 +188,7 @@ pub fn register_network_module<'gc>(
     // network.set(ctx, "request", request_callback)?;
 
     // Future: Register resolve callback
-    // let resolve_callback = Callback::new(&ctx, |ctx, _exec, mut stack| {
+    // let resolve_callback = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
     //     // Similar pattern for DNS resolution
     //     Ok(CallbackReturn::Return)
     // });
@@ -234,3 +240,4 @@ mod tests {
         let _ = runtime.request_for_plugin("test-plugin", request).await;
     }
 }
+pub mod callback;
