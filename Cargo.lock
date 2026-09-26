@@ -85,6 +85,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
+ "rustls-pki-types",
  "time",
  "tungstenite",
 ]

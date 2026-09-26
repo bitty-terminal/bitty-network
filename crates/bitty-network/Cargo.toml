@@ -50,6 +50,7 @@ rustls = { version = "=0.23.45", default-features = false, features = ["std"], o
 # certificate or key fixture is ever committed. `default-features = false`
 # with `aws_lc_rs` avoids pulling a second crypto provider into the test build.
 rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls-pki-types = "1.15.1"
 # `OffsetDateTime` is the type of a generated certificate's validity window.
 # Already in the graph through rcgen; a dev-dependency so the test-only
 # certificates can name an explicit, fixed window instead of "around now".
