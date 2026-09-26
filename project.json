@@ -1,0 +1,11 @@
+{
+  "created_at": "2026-09-23T04:30:09.060698720+00:00",
+  "git_common_dir": "***REDACTED-PATH***",
+  "id": "01M368EE54SRC919FQ433ZBRA9",
+  "main_branch": "main",
+  "name": "bitty-network",
+  "repository_root": "***REDACTED-PATH***",
+  "schema_version": 4,
+  "task_prefix": "CTX",
+  "updated_at": "2026-09-23T04:30:09.060698720+00:00"
+}
