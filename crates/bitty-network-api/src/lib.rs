@@ -1052,6 +1052,126 @@ fn url_host(url: &str) -> &str {
     }
 }
 
+// --- Inspector feed audit vocabulary --------------------------------------
+//
+// Per-plugin per-host audit entries for the Inspector feed (#31). The host
+// implements [`AuditSink`] and backends call it on every capability check
+// outcome (allow/deny). Types only, no I/O: the sink trait defines the
+// boundary, and the host owns storage, bounded memory, and the Inspector feed
+// itself.
+
+use std::time::SystemTime;
+
+/// One audit entry: the outcome of one capability check.
+///
+/// Backends emit an entry on every check outcome (allow or deny) by calling
+/// the host's [`AuditSink`]. The host owns storage and the bounded-memory
+/// strategy (ring buffer, cap, or other); this type carries no storage and
+/// defines no retention policy. Fields are deliberately minimal: decision,
+/// host, port, method (HTTP only; `None` for WebSocket), timestamp, and a
+/// plugin identity hook for the host to fill in.
+///
+/// No PII beyond host/port: no request body, no headers, no response, no URL
+/// path, no query string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Allow or deny.
+    pub decision: AuditDecision,
+    /// Target host (normalized, as checked).
+    pub host: String,
+    /// Target port.
+    pub port: u16,
+    /// HTTP method when applicable (`None` for WebSocket handshakes).
+    pub method: Option<HttpMethod>,
+    /// When the check occurred.
+    pub timestamp: SystemTime,
+    /// Plugin identity hook: the host fills this in before storing.
+    ///
+    /// Backends pass `None`; the host maps the current plugin context to a
+    /// stable identifier and replaces `None` with `Some(plugin_id)`. The type
+    /// is opaque here (a string) because the plugin model lives in the host,
+    /// not in this crate.
+    pub plugin_id: Option<String>,
+}
+
+impl AuditEntry {
+    /// Construct one entry for an HTTP request check.
+    #[must_use]
+    pub fn http(
+        decision: AuditDecision,
+        host: impl Into<String>,
+        port: u16,
+        method: HttpMethod,
+    ) -> Self {
+        Self {
+            decision,
+            host: host.into(),
+            port,
+            method: Some(method),
+            timestamp: SystemTime::now(),
+            plugin_id: None,
+        }
+    }
+
+    /// Construct one entry for a WebSocket handshake check.
+    #[must_use]
+    pub fn websocket(decision: AuditDecision, host: impl Into<String>, port: u16) -> Self {
+        Self {
+            decision,
+            host: host.into(),
+            port,
+            method: None,
+            timestamp: SystemTime::now(),
+            plugin_id: None,
+        }
+    }
+}
+
+/// Capability check outcome: allow or deny.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuditDecision {
+    /// The capability allowed the request.
+    Allow,
+    /// The capability denied the request (offline or explicit denial).
+    Deny,
+}
+
+/// Sink trait that the host implements to receive audit entries.
+///
+/// Backends call [`AuditSink::record`] on every capability check outcome
+/// (allow or deny). The host owns storage, the bounded-memory strategy (ring
+/// buffer, cap, or other), and the Inspector feed itself; this trait is the
+/// boundary through which backends report outcomes without knowing how the
+/// host stores them.
+///
+/// # Example
+///
+/// ```
+/// use bitty_network_api::{AuditEntry, AuditSink};
+///
+/// struct MemorySink {
+///     entries: std::sync::Mutex<Vec<AuditEntry>>,
+/// }
+///
+/// impl AuditSink for MemorySink {
+///     fn record(&self, entry: AuditEntry) {
+///         let mut entries = self.entries.lock().unwrap();
+///         entries.push(entry);
+///         // Bounded: keep the most recent 1000 entries.
+///         if entries.len() > 1000 {
+///             entries.remove(0);
+///         }
+///     }
+/// }
+/// ```
+pub trait AuditSink: Send + Sync {
+    /// Record one audit entry.
+    ///
+    /// Called by backends on every capability check outcome. The host owns
+    /// storage and bounded-memory enforcement; backends call this and move on.
+    fn record(&self, entry: AuditEntry);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
