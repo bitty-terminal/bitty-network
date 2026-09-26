@@ -25,6 +25,7 @@
 //! [`resolve_shared`]: bitty_network::dns::resolve_shared
 
 #![forbid(unsafe_code)]
+#![cfg(feature = "http")]
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;

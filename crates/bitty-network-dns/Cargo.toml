@@ -1,0 +1,17 @@
+[package]
+name = "bitty-network-dns"
+description = "Bitty network DNS resolution and caching — explicit resolver seam with cancellation and deadlines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "dns", "bitty"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# No external dependencies — DNS is purely stdlib (collections, sync, time, net)

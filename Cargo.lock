@@ -55,6 +55,7 @@ version = "0.1.0"
 dependencies = [
  "bitty-network-api",
  "bitty-network-core",
+ "bitty-network-dns",
  "idna",
  "rcgen",
  "reqwest",
@@ -76,6 +77,10 @@ version = "0.1.0"
 dependencies = [
  "bitty-network-api",
 ]
+
+[[package]]
+name = "bitty-network-dns"
+version = "0.1.0"
 
 [[package]]
 name = "block-buffer"
