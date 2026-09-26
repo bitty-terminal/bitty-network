@@ -75,11 +75,11 @@ const API_MANIFEST: &str = include_str!("../../bitty-network-api/Cargo.toml");
 /// Resolved dependency graph: which root store the TLS stacks actually pull.
 const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
 /// The TLS provider module and the two files under it.
-const TLS_SOURCE: &str = include_str!("../src/tls.rs");
+const TLS_SOURCE: &str = include_str!("../../bitty-network-tls/src/lib.rs");
 /// The provider implementation (trust composition, identity loading, selection).
-const TLS_PROVIDER_SOURCE: &str = include_str!("../src/tls/provider.rs");
+const TLS_PROVIDER_SOURCE: &str = include_str!("../../bitty-network-tls/src/provider.rs");
 /// The X.509 attribute reader that admits a trust anchor.
-const TLS_X509_SOURCE: &str = include_str!("../src/tls/x509.rs");
+const TLS_X509_SOURCE: &str = include_str!("../../bitty-network-tls/src/x509.rs");
 /// The WebSocket handshake path, which selects a TLS configuration per handshake.
 const WEBSOCKET_SOURCE: &str = include_str!("../src/websocket.rs");
 /// The HTTP backend source (feature-gated; still readable without it).
@@ -767,9 +767,9 @@ fn no_key_bearing_type_can_derive_serde() {
     );
     for (label, source) in [
         ("bitty-network-api/src/lib.rs", API_SOURCE),
-        ("bitty-network/src/tls.rs", TLS_SOURCE),
-        ("bitty-network/src/tls/provider.rs", TLS_PROVIDER_SOURCE),
-        ("bitty-network/src/tls/x509.rs", TLS_X509_SOURCE),
+        ("bitty-network-tls/src/lib.rs", TLS_SOURCE),
+        ("bitty-network-tls/src/provider.rs", TLS_PROVIDER_SOURCE),
+        ("bitty-network-tls/src/x509.rs", TLS_X509_SOURCE),
         ("bitty-network/src/http.rs", HTTP_SOURCE),
         ("bitty-network/src/websocket.rs", WEBSOCKET_SOURCE),
         ("bitty-network/src/proxy.rs", PROXY_SOURCE),

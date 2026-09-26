@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Refactor**: Extracted TLS trust and client-identity provider into new
+  `bitty-network-tls` crate (`#56`, phase 3/7 of crate split). Moved `tls` module
+  from `bitty-network` to `bitty-network-tls` (~2433 lines: lib.rs, provider.rs,
+  x509.rs). The TLS crate includes rustls, rustls-platform-verifier, rustls-pki-types,
+  idna, and zeroize dependencies. `bitty-network` re-exports the tls module when
+  the http feature is enabled. Zero breaking changes to external API; all existing
+  tests pass unchanged. Test file `tls_baseline_properties.rs` updated to reference
+  the new crate location.
 - **Refactor**: Extracted DNS resolution and caching into new `bitty-network-dns`
   crate (`#56`, phase 2/7 of crate split). Moved `dns` module from `bitty-network`
   to `bitty-network-dns`. The DNS crate is dependency-free (stdlib only) and

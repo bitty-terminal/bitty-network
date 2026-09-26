@@ -59,7 +59,13 @@ pub mod dns;
 pub mod http;
 pub mod offline;
 pub mod proxy;
-pub mod tls;
+#[cfg(feature = "http")]
+pub mod tls {
+    //! TLS trust and client-identity provider.
+    //!
+    //! Re-exported from [`bitty_network_tls`].
+    pub use bitty_network_tls::*;
+}
 pub mod transport;
 #[cfg(feature = "websocket")]
 pub mod websocket;

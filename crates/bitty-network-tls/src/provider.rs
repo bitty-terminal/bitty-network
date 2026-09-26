@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bitty_network_api::{
-    ClientIdentityRule, MAX_CLIENT_IDENTITY_RULES, MAX_HOSTS_PER_IDENTITY_RULE, PemSource,
-    TlsConfig, TlsFailure,
+    ClientIdentityRule, PemSource, TlsConfig, TlsFailure, MAX_CLIENT_IDENTITY_RULES,
+    MAX_HOSTS_PER_IDENTITY_RULE,
 };
 use rustls::ClientConfig;
 use rustls_pki_types::pem::SectionKind;
@@ -709,8 +709,8 @@ mod tests {
     use std::cell::Cell;
 
     use rcgen::{
-        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-        date_time_ymd,
+        date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa,
+        KeyPair,
     };
 
     /// A self-signed runtime CA, minted in memory, as PEM a policy would take.
