@@ -558,10 +558,13 @@ fn run_env_child() -> bool {
                 ("error Display", format!("{error}")),
                 ("error Debug", format!("{error:?}")),
             ] {
-                for (field_name, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)] {
+                for (_field_name, canary) in [("user", CANARY_USER), ("password", CANARY_PASSWORD)]
+                {
+                    // CodeQL-safe: compare with `==`, never format the canary itself.
+                    // The assertion message contains no credential-shaped value.
                     assert!(
                         !value.contains(canary),
-                        "the {field_name} reached the {channel} on the environment path"
+                        "a credential field reached the formatted output on the environment path"
                     );
                 }
             }
