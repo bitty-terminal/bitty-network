@@ -84,9 +84,10 @@ rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs"
 # `OffsetDateTime` is the type of a generated certificate's validity window.
 # Already in the graph through rcgen; a dev-dependency so the test-only
 # certificates can name an explicit, fixed window instead of "around now".
-# Upgraded to 0.3.55 to resolve RUSTSEC-2026-0009 (security vulnerability in
-# 0.3.41). The pin lives here, in one place, and the lockfile follows it.
-time = { version = "=0.3.55", default-features = false, features = ["std"] }
+# Pinned to 0.3.41 (last version compatible with MSRV 1.85). RUSTSEC-2026-0009
+# affects this version but is in the unreachable RFC 2822 parser, and the fix
+# needs rustc 1.88. Documented in deny.toml as a dev-dependency exception.
+time = { version = "=0.3.41", default-features = false, features = ["std"] }
 
 [features]
 default = []

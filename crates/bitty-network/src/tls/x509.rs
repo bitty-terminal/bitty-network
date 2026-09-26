@@ -1349,7 +1349,7 @@ mod tests {
         for cut in 0..cert_len {
             assert!(
                 admit_root(&certificate[..cut]).is_err(),
-                "a {cut}-byte prefix of a {cert_len}-byte certificate must be refused"
+                "a truncated certificate prefix must be refused"
             );
         }
         assert!(admit_root(&certificate).is_ok());
