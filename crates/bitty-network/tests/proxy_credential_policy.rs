@@ -23,23 +23,27 @@
 
 #![forbid(unsafe_code)]
 
-use bitty_network::{Request, Response, WebSocketRequest};
+use bitty_network::{NetworkError, Request, Response, WebSocketRequest};
+
+use std::{
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(feature = "http")]
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    process::{Command, Output, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    thread::JoinHandle,
 };
 
 #[cfg(feature = "http")]
-use bitty_network::{HttpNetworkService, NetworkCapability, NetworkError, NetworkService};
+use bitty_network::{HttpNetworkService, NetworkCapability, NetworkService};
 
 /// Obvious non-secret canaries. Not a credential, and never a real one.
 const CANARY_USER: &str = "pin-user";
@@ -140,25 +144,49 @@ fn http_network_service_debug_is_hand_written_and_cannot_emit_a_credential() {
 }
 
 /// Pins "Redaction and diagnostics" -> "Serialization and equality": `Request`,
-/// `WebSocketRequest`, and `Response` still derive `Debug` and `PartialEq`,
-/// and the leak those derives cause is still there.
+/// `WebSocketRequest`, and `Response` have hand-written redacting `Debug` impls
+/// and retain `PartialEq`/`Eq`.
 ///
-/// This is a tripwire, not an endorsement. Those derives are unchanged on
-/// every baseline the decision reviews, so a failed equality assertion on a
-/// credential-bearing value still prints it. The decision keeps flagging that
-/// as an open, unmitigated state, and this test is what stops the flag from
-/// going stale, because it fails in both directions:
-///
-/// - Remove a `Debug` derive and the `{:?}` lines stop compiling, so the
-///   change cannot land unnoticed.
-/// - Swap a derived `Debug` for a redacting hand-written one and the leak
-///   assertions below fail, because a mitigation arrived without the decision
-///   being revisited.
-///
-/// When the mitigation lands, this test goes with it and the decision is
-/// updated in the same change. Do not weaken it to make it pass.
+/// Transposed from the earlier tripwire pin (`api_vocabulary_types_still_derive_debug_and_equality_and_still_leak`).
+/// The `Debug` derive is gone from all three API vocabulary types (and `NetworkError`),
+/// all seven canary assertions are inverted to assert absence, and positive
+/// structural assertions verify that the types still emit method, scheme,
+/// host, status code, and header/protocol counts.
 #[test]
-fn api_vocabulary_types_still_derive_debug_and_equality_and_still_leak() {
+fn api_vocabulary_debug_is_redacting_and_still_structurally_descriptive() {
+    let source = include_str!("../../../crates/bitty-network-api/src/lib.rs");
+    for type_name in [
+        "struct Request",
+        "struct Response",
+        "struct WebSocketRequest",
+        "enum NetworkError",
+    ] {
+        let decl = format!("pub {type_name}");
+        let mut above: Vec<&str> = Vec::new();
+        let mut found = false;
+        let mut derived = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&decl) {
+                found = true;
+                derived = above
+                    .iter()
+                    .any(|attr| attr.starts_with("#[derive(") && attr.contains("Debug"));
+                break;
+            }
+            if trimmed.starts_with('#') || trimmed.starts_with("///") {
+                above.push(trimmed);
+            } else {
+                above.clear();
+            }
+        }
+        assert!(found, "lib.rs declares {type_name}");
+        assert!(
+            !derived,
+            "{type_name} has a derived Debug; hand-written redacting Debug is required"
+        );
+    }
+
     let credentialed_url =
         format!("https://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_ORIGIN_HOST}/p");
     let request = Request::get(credentialed_url.clone())
@@ -175,13 +203,34 @@ fn api_vocabulary_types_still_derive_debug_and_equality_and_still_leak() {
         ("request url password", CANARY_PASSWORD),
     ] {
         assert!(
-            request_debug.contains(canary),
-            "the derived Request Debug no longer emits the {label}; the decision's open item must be revisited"
+            !request_debug.contains(canary),
+            "Request Debug emitted the {label}"
         );
     }
+    // Positive structural assertions:
+    assert!(
+        request_debug.contains("Get"),
+        "Request Debug must print the method"
+    );
+    assert!(
+        request_debug.contains("https://"),
+        "Request Debug must print the scheme"
+    );
+    assert!(
+        request_debug.contains(CANARY_ORIGIN_HOST),
+        "Request Debug must print the origin host"
+    );
+    assert!(
+        request_debug.contains("header_count: 1"),
+        "Request Debug must print the header count"
+    );
     assert!(
         request_debug.contains("Authorization"),
-        "the derived Request Debug must still print header names"
+        "Request Debug must print the header name"
+    );
+    assert!(
+        request_debug.contains("[redacted]"),
+        "Request Debug must mark header value as redacted"
     );
 
     let response = Response {
@@ -190,9 +239,22 @@ fn api_vocabulary_types_still_derive_debug_and_equality_and_still_leak() {
         body: Vec::new(),
     };
     assert!(response == response.clone(), "Response must stay PartialEq");
+    let response_debug = format!("{response:?}");
     assert!(
-        format!("{response:?}").contains(CANARY_COOKIE),
-        "the derived Response Debug no longer emits a header value; the decision's open item must be revisited"
+        !response_debug.contains(CANARY_COOKIE),
+        "Response Debug emitted the cookie canary"
+    );
+    assert!(
+        response_debug.contains("401"),
+        "Response Debug must print the numeric status"
+    );
+    assert!(
+        response_debug.contains("header_count: 1"),
+        "Response Debug must print the header count"
+    );
+    assert!(
+        response_debug.contains("Set-Cookie"),
+        "Response Debug must print the header name"
     );
 
     let socket_url = format!("wss://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_ORIGIN_HOST}/socket");
@@ -208,10 +270,164 @@ fn api_vocabulary_types_still_derive_debug_and_equality_and_still_leak() {
         ("socket url password", CANARY_PASSWORD),
     ] {
         assert!(
-            socket_debug.contains(canary),
-            "the derived WebSocketRequest Debug no longer emits the {label}; the decision's open item must be revisited"
+            !socket_debug.contains(canary),
+            "WebSocketRequest Debug emitted the {label}"
         );
     }
+    assert!(
+        socket_debug.contains("wss://"),
+        "WebSocketRequest Debug must print the scheme"
+    );
+    assert!(
+        socket_debug.contains(CANARY_ORIGIN_HOST),
+        "WebSocketRequest Debug must print the origin host"
+    );
+    assert!(
+        socket_debug.contains("protocol_count: 1"),
+        "WebSocketRequest Debug must print the protocol count"
+    );
+}
+
+const FAILED_EQ_CHILD_MODE: &str = "BITTY_NETWORK_FAILED_EQ_CHILD";
+const FAILED_EQ_CHILD_TEST: &str =
+    "failed_equality_assertion_output_is_redacted_in_a_child_process";
+
+fn run_failed_equality_child() -> bool {
+    if std::env::var(FAILED_EQ_CHILD_MODE).is_err() {
+        return false;
+    }
+    let credentialed_url1 =
+        format!("https://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_ORIGIN_HOST}/left");
+    let req1 = Request::get(credentialed_url1)
+        .with_header("Authorization", format!("Bearer {CANARY_TOKEN}"));
+
+    let credentialed_url2 =
+        format!("https://{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_ORIGIN_HOST}/right");
+    let req2 = Request::get(credentialed_url2)
+        .with_header("Authorization", format!("Bearer {CANARY_TOKEN}"));
+
+    // assert_eq! formats both operands with Debug upon failure
+    assert_eq!(req1, req2);
+    true
+}
+
+fn run_failed_equality_child_process() -> Output {
+    let mut command = Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .arg(FAILED_EQ_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(FAILED_EQ_CHILD_MODE, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("failed equality child process");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("failed equality child process exceeded its wait bound");
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                panic!("failed equality child process wait failed: {error}");
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .expect("failed equality child output")
+}
+
+/// Pins child-process failed-equality assertion output: when `assert_eq!` fails
+/// on a credential-bearing type, neither URL userinfo nor header tokens leak
+/// to child stdout or stderr.
+#[test]
+fn failed_equality_assertion_output_is_redacted_in_a_child_process() {
+    if run_failed_equality_child() {
+        return;
+    }
+    let output = run_failed_equality_child_process();
+    assert!(
+        !output.status.success(),
+        "child process must fail on assert_eq!"
+    );
+    let captured = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        captured.contains("panicked at"),
+        "child output must indicate panic"
+    );
+    assert!(
+        captured.contains("left") && captured.contains("right"),
+        "child output must indicate assert_eq! comparison operands"
+    );
+    for (label, canary) in [
+        ("header canary", CANARY_TOKEN),
+        ("userinfo canary", CANARY_USER),
+        ("password canary", CANARY_PASSWORD),
+    ] {
+        assert!(
+            !captured.contains(canary),
+            "failed equality assertion output emitted {label}"
+        );
+    }
+}
+
+/// Pins `NetworkError::Denied` redaction and source-chain decision:
+/// `Display` and `Debug` do not echo raw userinfo on the domain,
+/// and `source()` explicitly returns `None`.
+#[test]
+fn network_error_denied_domain_is_not_echoed() {
+    let raw_domain = format!("{CANARY_USER}:{CANARY_PASSWORD}@{CANARY_ORIGIN_HOST}");
+    let error = NetworkError::Denied { domain: raw_domain };
+    let display = format!("{error}");
+    let debug = format!("{error:?}");
+
+    for (label, canary) in [("userinfo", CANARY_USER), ("password", CANARY_PASSWORD)] {
+        assert!(
+            !display.contains(canary),
+            "NetworkError Display emitted {label}"
+        );
+        assert!(
+            !debug.contains(canary),
+            "NetworkError Debug emitted {label}"
+        );
+    }
+
+    assert!(
+        display.contains("[invalid-host]"),
+        "NetworkError Display must indicate invalid-host for raw domain with credentials"
+    );
+    assert!(
+        debug.contains("[invalid-host]"),
+        "NetworkError Debug must indicate invalid-host for raw domain with credentials"
+    );
+
+    let clean_error = NetworkError::Denied {
+        domain: CANARY_ORIGIN_HOST.to_owned(),
+    };
+    assert!(
+        format!("{clean_error}").contains(CANARY_ORIGIN_HOST),
+        "NetworkError Display must emit valid domain"
+    );
+    assert!(
+        format!("{clean_error:?}").contains(CANARY_ORIGIN_HOST),
+        "NetworkError Debug must emit valid domain"
+    );
+
+    use std::error::Error;
+    assert!(
+        error.source().is_none(),
+        "NetworkError must explicitly return None for source, carrying no raw third-party chain"
+    );
 }
 
 /// Pins "Environment routing and fail-closed construction" and "Credential
