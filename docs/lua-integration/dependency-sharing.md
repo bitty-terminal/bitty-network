@@ -2,16 +2,16 @@
 
 ## Problem: Dependency Hell
 
-当多个 Lua 插件都需要网络功能时，如果每个插件都独立加载 `bitty-network`，会导致：
+When multiple Lua plugins require network capabilities, if each plugin independently loads `bitty-network`, it causes:
 
-1. **重复依赖**：同一个 Rust crate 被加载多次
-2. **内存浪费**：DNS 缓存、TLS session cache 被复制多份
-3. **连接池冲突**：HTTP 连接池无法共享
-4. **资源耗尽**：每个插件都有自己的 connection limit
+1. **Duplicate Dependencies**: The same Rust crate is loaded multiple times.
+2. **Memory Waste**: DNS cache and TLS session cache are duplicated.
+3. **Connection Pool Contention**: HTTP connection pools cannot be shared.
+4. **Resource Exhaustion**: Each plugin maintains its own connection limit.
 
 ## Solution: Shared Network Runtime
 
-### 架构设计
+### Architecture Design
 
 ```
 bitty-plugin-host (Rust)
@@ -27,12 +27,12 @@ bitty.network (Lua module, loaded once)
 Plugin A, Plugin B, Plugin C... (Lua)
 ```
 
-### 关键原则
+### Key Principles
 
-1. **单例模式**：`NetworkRuntime` 在 `bitty-plugin-host` 中只有一个实例
-2. **共享资源**：DNS 缓存、TLS cache、连接池全局共享
-3. **隔离控制**：每个插件有独立的 capability 和 resource limits
-4. **懒加载**：只有当第一个插件请求网络功能时才初始化
+1. **Singleton Pattern**: Exactly one `NetworkRuntime` instance exists in `bitty-plugin-host`.
+2. **Shared Resources**: DNS cache, TLS session cache, and connection pools are globally shared.
+3. **Isolation and Control**: Each plugin maintains independent capabilities and resource limits.
+4. **Lazy Initialization**: Initialization occurs only when the first plugin requests network access.
 
 ## Implementation
 
@@ -179,7 +179,7 @@ end
 
 ## Resource Isolation
 
-虽然底层资源共享，但每个插件有独立的限制：
+While underlying resources are shared, each plugin enforces independent limits:
 
 ```rust
 pub struct ResourceLimits {
@@ -187,9 +187,9 @@ pub struct ResourceLimits {
 }
 
 pub struct PluginLimits {
-    max_concurrent_requests: usize,    // 每个插件最多 10 个并发请求
-    max_requests_per_second: usize,    // 每秒最多 100 个请求
-    total_bandwidth_bytes: usize,      // 总带宽限制
+    max_concurrent_requests: usize,    // Maximum 10 concurrent requests per plugin
+    max_requests_per_second: usize,    // Maximum 100 requests per second
+    total_bandwidth_bytes: usize,      // Total bandwidth limit
 }
 
 impl ResourceLimits {
@@ -211,25 +211,25 @@ impl ResourceLimits {
 
 ## Benefits
 
-### 1. 内存效率
-- ✅ DNS 缓存只有一份（全局共享）
-- ✅ TLS session cache 只有一份
-- ✅ HTTP 连接池只有一份（复用 TCP 连接）
+### 1. Memory Efficiency
+- ✅ Single shared DNS cache (globally shared)
+- ✅ Single shared TLS session cache
+- ✅ Single shared HTTP connection pool (reuses TCP connections)
 
-### 2. 性能提升
-- ✅ DNS 查询结果跨插件复用
-- ✅ TLS handshake 结果跨插件复用
-- ✅ Keep-alive 连接跨插件复用
+### 2. Performance Improvement
+- ✅ DNS query results reused across plugins
+- ✅ TLS handshake results reused across plugins
+- ✅ Keep-alive connections reused across plugins
 
-### 3. 资源控制
-- ✅ 全局并发请求数可控
-- ✅ 每个插件有独立的 rate limit
-- ✅ 公平调度（可选：加权队列）
+### 3. Resource Control
+- ✅ Globally bounded concurrent request count
+- ✅ Independent rate limit per plugin
+- ✅ Fair scheduling (optional: weighted queue)
 
-### 4. 安全隔离
-- ✅ 每个插件有独立的 capability 检查
-- ✅ 插件 A 无法看到插件 B 的请求/响应
-- ✅ 审计日志记录每个插件的网络活动
+### 4. Security Isolation
+- ✅ Independent capability verification per plugin
+- ✅ Plugin A cannot inspect Plugin B's requests or responses
+- ✅ Audit log records every plugin's network activity
 
 ## Example: DNS Cache Sharing
 
