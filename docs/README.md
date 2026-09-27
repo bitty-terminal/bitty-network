@@ -16,7 +16,7 @@
 - [25: Authenticated Proxy](decisions/25-proxy-auth.md) - Authenticated-proxy credential handling and transition criteria
 - [26: Server Feature](decisions/26-server.md) - Direction decision for server/listen capabilities
 - [27: QUIC Transport](decisions/27-quic.md) - Direction decision for QUIC transport
-- [28: OAuth Credential Flow](decisions/28-oauth.md) - OAuth credential flow and provider integration
+- [28: OAuth Credential Flow](decisions/28-oauth.md) - OAuth credential flow architecture and security boundary
 - [29: Proxy Feature Gate](decisions/29-proxy.md) - Feature gate semantics for proxy routing
 - [30: Service Bridge](decisions/30-bridge.md) - Service bridge and external network daemon direction
 - [31: Inspector Feed](decisions/31-inspector-feed.md) - Network inspector feed audit vocabulary and sink trait

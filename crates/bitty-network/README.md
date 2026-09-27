@@ -49,8 +49,8 @@ tree (`=0.30.0`, same pinning) and implies `http`:
   see `../../docs/decisions/27-quic.md`).
 - `proxy` — environment-proxy inheritance opt-in (explicit proxies stay
   always-on; see `../../docs/decisions/29-proxy.md` and `src/proxy.rs`).
-- `oauth` — deferred credential flow, jointly owned with bitty-ai
-  (fail-closed; see `../../docs/decisions/28-oauth.md`).
+- `oauth` — OAuth credential flow architecture boundary, co-signed with
+  bitty-ai (fail-closed; see `../../docs/decisions/28-oauth.md`).
 - Bridge to an external `bitty-networkd` (BN-6): move criteria and bridge
   shape are defined in `../../docs/decisions/30-bridge.md`; embedded stays the
   only backend.

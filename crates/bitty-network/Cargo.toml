@@ -84,7 +84,9 @@ quic = []
 # (including lowercase spellings); without it egress is direct-only unless
 # the caller passes an explicit proxy (always on).
 proxy = []
-# Accepted fail-closed no-op (CTX-0015, issue #28): oauth credential flow
-# is deferred to a joint design with the bitty-ai owners plus a
-# security-corpus review. No token code behind this gate until sign-off.
+# OAuth credential flow architecture boundary (#28, CTX-0066): co-signed
+# with bitty-ai owners. Provider plugins own OAuth token storage and
+# refresh behind opaque secret:// handles; bitty-network serves transport
+# with capability gating, connection pool invalidation, and strict redaction.
 oauth = []
+
