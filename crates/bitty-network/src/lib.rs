@@ -78,6 +78,7 @@ pub use bitty_network_core::{
 #[cfg(feature = "http")]
 pub use crate::http::HttpNetworkService;
 pub use crate::offline::{OfflineNetworkService, OfflineSocket};
+pub use crate::proxy::{ProxyCredentialProvider, ProxyCredentialRecord};
 #[cfg(feature = "websocket")]
 pub use crate::websocket::{WebSocketSocket, WsMessage};
 pub use bitty_network_api::{

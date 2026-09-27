@@ -115,6 +115,7 @@
 //! ```
 
 use std::io::Write;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bitty_network_api::{
@@ -224,6 +225,7 @@ pub struct HttpNetworkService {
     /// The shared TLS policy: trust composition and client-identity selection.
     provider: TlsProvider,
     egress: Egress,
+    credential_provider: Option<Arc<dyn crate::proxy::ProxyCredentialProvider>>,
 }
 
 impl std::fmt::Debug for HttpNetworkService {
@@ -480,6 +482,7 @@ impl HttpNetworkService {
                 proxy_rejected: true,
                 deny_all: true,
             },
+            credential_provider: None,
         }
     }
 
@@ -520,6 +523,7 @@ impl HttpNetworkService {
                 proxy_rejected,
                 ..egress
             },
+            credential_provider: None,
         })
     }
 
@@ -535,6 +539,49 @@ impl HttpNetworkService {
         proxy_url: &str,
     ) -> Result<Self, NetworkError> {
         Self::with_tls_and_proxy(capability, TlsProvider::native_only(), proxy_url)
+    }
+
+    /// Serve HTTP under `capability` via one explicit proxy URL and one
+    /// caller-provided [`ProxyCredentialProvider`](crate::proxy::ProxyCredentialProvider) handle.
+    pub fn with_proxy_and_credential_provider(
+        capability: NetworkCapability,
+        proxy_url: &str,
+        provider: Arc<dyn crate::proxy::ProxyCredentialProvider>,
+    ) -> Result<Self, NetworkError> {
+        let mut service = Self::with_proxy(capability, proxy_url)?;
+        service.credential_provider = Some(provider);
+        Ok(service)
+    }
+
+    /// Serve HTTP under `capability` with environment proxy and one
+    /// caller-provided [`ProxyCredentialProvider`](crate::proxy::ProxyCredentialProvider) handle.
+    pub fn with_credential_provider(
+        capability: NetworkCapability,
+        provider: Arc<dyn crate::proxy::ProxyCredentialProvider>,
+    ) -> Self {
+        let mut service = Self::new(capability);
+        service.credential_provider = Some(provider);
+        service
+    }
+
+    /// Serve HTTP under `capability` with explicit proxy URL, explicit bypass list,
+    /// and one caller-provided [`ProxyCredentialProvider`](crate::proxy::ProxyCredentialProvider) handle.
+    pub fn with_proxy_bypass_and_provider(
+        capability: NetworkCapability,
+        proxy_url: &str,
+        no_proxy: &str,
+        provider: Arc<dyn crate::proxy::ProxyCredentialProvider>,
+    ) -> Result<Self, NetworkError> {
+        let route = ProxyRoute::explicit(proxy_url)?;
+        let mut service = Self::from_egress(
+            capability,
+            TlsProvider::native_only(),
+            route,
+            no_proxy.to_owned(),
+            false,
+        )?;
+        service.credential_provider = Some(provider);
+        Ok(service)
     }
 
     fn ensure_proxy_usable(&self) -> Result<(), NetworkError> {
@@ -645,11 +692,25 @@ impl HttpNetworkService {
         url: &str,
         host: &str,
     ) -> Result<&reqwest::blocking::Client, NetworkError> {
+        self.ensure_proxy_usable()?;
         let selection = self
             .provider
             .select(TlsTransport::Http, host)
             .map_err(tls_failure)?;
-        let clients = match self.selected_proxy(url, host) {
+        let proxy_opt = self.selected_proxy(url, host);
+        if let Some(proxy_str) = proxy_opt {
+            if let Some(ref cred_provider) = self.credential_provider {
+                let proxy_origin =
+                    CanonicalOrigin::parse(proxy_str).map_err(|_| NetworkError::Offline)?;
+                let dest_origin = CanonicalOrigin::parse(url).map_err(|_| NetworkError::Offline)?;
+                let _record = crate::proxy::resolve_proxy_record(
+                    cred_provider.as_ref(),
+                    &proxy_origin,
+                    &dest_origin,
+                )?;
+            }
+        }
+        let clients = match proxy_opt {
             Some(_) => &self.egress.proxied,
             None => &self.egress.direct,
         };
@@ -1058,11 +1119,21 @@ impl NetworkService for HttpNetworkService {
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError> {
         self.capability.check_handshake(request)?;
         self.ensure_proxy_usable()?;
-        crate::websocket::connect(
-            request,
-            self.proxy_url_for(&request.url, request.host()).as_deref(),
-            &self.provider,
-        )
+        let proxy_opt = self.proxy_url_for(&request.url, request.host());
+        if let Some(ref proxy_str) = proxy_opt {
+            if let Some(ref cred_provider) = self.credential_provider {
+                let proxy_origin =
+                    CanonicalOrigin::parse(proxy_str).map_err(|_| NetworkError::Offline)?;
+                let dest_origin =
+                    CanonicalOrigin::parse(&request.url).map_err(|_| NetworkError::Offline)?;
+                let _record = crate::proxy::resolve_proxy_record(
+                    cred_provider.as_ref(),
+                    &proxy_origin,
+                    &dest_origin,
+                )?;
+            }
+        }
+        crate::websocket::connect(request, proxy_opt.as_deref(), &self.provider)
     }
 
     #[cfg(not(feature = "websocket"))]
