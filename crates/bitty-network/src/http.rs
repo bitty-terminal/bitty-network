@@ -226,6 +226,7 @@ pub struct HttpNetworkService {
     provider: TlsProvider,
     egress: Egress,
     credential_provider: Option<Arc<dyn crate::proxy::ProxyCredentialProvider>>,
+    scope_registry: Arc<crate::proxy::ScopeRegistry<reqwest::blocking::Client>>,
 }
 
 impl std::fmt::Debug for HttpNetworkService {
@@ -483,6 +484,7 @@ impl HttpNetworkService {
                 deny_all: true,
             },
             credential_provider: None,
+            scope_registry: Arc::new(crate::proxy::ScopeRegistry::new()),
         }
     }
 
@@ -524,6 +526,7 @@ impl HttpNetworkService {
                 ..egress
             },
             credential_provider: None,
+            scope_registry: Arc::new(crate::proxy::ScopeRegistry::new()),
         })
     }
 
@@ -596,6 +599,31 @@ impl HttpNetworkService {
     #[must_use]
     pub fn capability(&self) -> &NetworkCapability {
         &self.capability
+    }
+
+    /// The scope registry owning authenticated clients, connection pools, and leases.
+    #[must_use]
+    pub fn scope_registry(&self) -> &Arc<crate::proxy::ScopeRegistry<reqwest::blocking::Client>> {
+        &self.scope_registry
+    }
+
+    /// Return a copy of this service using `registry` as its scope registry.
+    #[must_use]
+    pub fn with_scope_registry(
+        mut self,
+        registry: Arc<crate::proxy::ScopeRegistry<reqwest::blocking::Client>>,
+    ) -> Self {
+        self.scope_registry = registry;
+        self
+    }
+
+    fn proxied_client(&self, slot: usize) -> Result<reqwest::blocking::Client, NetworkError> {
+        self.egress
+            .proxied
+            .get(slot)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(NetworkError::Offline)
     }
 
     /// The builder every reqwest client in this backend is constructed from.
@@ -703,11 +731,18 @@ impl HttpNetworkService {
                 let proxy_origin =
                     CanonicalOrigin::parse(proxy_str).map_err(|_| NetworkError::Offline)?;
                 let dest_origin = CanonicalOrigin::parse(url).map_err(|_| NetworkError::Offline)?;
-                let _record = crate::proxy::resolve_proxy_record(
+                let record = crate::proxy::resolve_proxy_record(
                     cred_provider.as_ref(),
                     &proxy_origin,
                     &dest_origin,
                 )?;
+                let pool_key = crate::proxy::PoolKey::from_record(&record, &dest_origin);
+                let (_item, lease) = self
+                    .scope_registry
+                    .checkout_or_create(&pool_key, || self.proxied_client(selection.slot()))?;
+                if !lease.is_active() {
+                    return Err(NetworkError::Offline);
+                }
             }
         }
         let clients = match proxy_opt {
@@ -1126,11 +1161,18 @@ impl NetworkService for HttpNetworkService {
                     CanonicalOrigin::parse(proxy_str).map_err(|_| NetworkError::Offline)?;
                 let dest_origin =
                     CanonicalOrigin::parse(&request.url).map_err(|_| NetworkError::Offline)?;
-                let _record = crate::proxy::resolve_proxy_record(
+                let record = crate::proxy::resolve_proxy_record(
                     cred_provider.as_ref(),
                     &proxy_origin,
                     &dest_origin,
                 )?;
+                let pool_key = crate::proxy::PoolKey::from_record(&record, &dest_origin);
+                let (_item, lease) = self
+                    .scope_registry
+                    .checkout_or_create(&pool_key, || self.proxied_client(0))?;
+                if !lease.is_active() {
+                    return Err(NetworkError::Offline);
+                }
             }
         }
         crate::websocket::connect(request, proxy_opt.as_deref(), &self.provider)

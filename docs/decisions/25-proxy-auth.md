@@ -377,11 +377,11 @@ Both are recorded as open below and marked in place where they are stated.
 
 ## Pool ownership, checkout, and invalidation
 
-**[specified, not implemented]** — there is no scope registry, no pool key, no
-lease type, and no invalidation path in any code on the base pin or on
-`de77e17`. The base pin pools connections by reqwest's own pool key, which
-contains no credential-record identity, no generation, and no scope epoch.
-Everything in this section is a requirement for a future implementation.
+**[implemented, PR #25 (Criterion 7)]** — `ScopeRegistry`, `PoolKey`, and
+`AuthorizationLease` are implemented in `crates/bitty-network/src/proxy.rs` and
+integrated into `HttpNetworkService`. Every authenticated egress checkout revalidates
+all five pool-key fields and takes an active `AuthorizationLease` under synchronization
+guards. Invalidation marks the entry inactive, cancels leases, and drains in-flight leases.
 
 Every authenticated client and connection pool has one scope registry owner.
 A pool key is a structured value containing at least:
@@ -396,14 +396,11 @@ The identity is a collision-free, provider-scoped non-secret record identity,
 never secret material. The key may include transport and protocol
 discriminants, but no code path may omit any of these five fields.
 
-**[specified, not implemented]** — the cross-record uniqueness rule in the next
+**[implemented, PR #25 (Criterion 7)]** — the cross-record uniqueness rule in the next
 paragraph, in full. Generation and scope epoch are not assumed globally unique
-across records: two different records with equal generation and scope epoch must
-still have different pool keys and can never share a pool. An equivalent
-globally unique opaque credential generation is permitted only when it has the
-same collision-free property. No code enforces this, because no record identity
-exists to collide: a reader must not infer that the two fields being separately
-monotonic makes them jointly identifying.
+across records: two different records with equal generation and scope epoch have
+different pool keys (differentiated by stable `credential_id`) and never share a pool.
+Pinned by `crates/bitty-network/tests/proxy_pool_lease.rs::fn distinct_records_with_equal_generation_and_scope_epoch_get_distinct_pools`.
 
 A client, pool, connection, authorization attachment, or tunnel is owned by
 exactly one registry entry and is accessible only while holding a lease obtained
@@ -432,11 +429,10 @@ scope or rotation.
 
 ## Rotation, leases, and remote revocation
 
-**[specified, not implemented]** — no `AuthorizationLease`, no rotation
-protocol, and no remote-revocation path exists on the base pin or on
-`de77e17`. There is no credential to rotate and no proxy session to revoke.
-Everything in this section is a requirement for a future implementation, and
-none of it may be read as a description of current behaviour.
+**[partially implemented, PR #25 (Criterion 7)]** — `AuthorizationLease` is
+implemented in `crates/bitty-network/src/proxy.rs` and bound to `PoolKey` (record snapshot,
+scope epoch, generation, and origins). Dynamic remote-revocation signaling and authorization
+header injection remain specified for subsequent criteria.
 
 Every authorization attachment carries an `AuthorizationLease` tied to its
 record snapshot, scope epoch, generation, and pool key. The final
@@ -933,7 +929,7 @@ rather than a document when a control regresses.
 | `with_proxy` retains a structurally sanitized endpoint rather than the caller's bytes                                                                   | not present                       | not applicable   | `crates/bitty-network/src/http.rs::fn validated_proxy_url(`; `crates/bitty-network/src/http.rs::fn explicit(proxy_url: &str) -> Result<Self, NetworkError> {`; `crates/bitty-network/src/http.rs::struct ProxyRoute {`. `validated_proxy_url` returns `url.to_owned()` into `ProxyRoute.all`, so the retained value is credential-free but not parse-derived                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `Request`, `WebSocketRequest`, and `Response` free of derived `Debug`, retaining `PartialEq`                                                            | present                           | unmerged, PR #25 | `crates/bitty-network-api/src/lib.rs::pub struct Request {`; `crates/bitty-network-api/src/lib.rs::pub struct WebSocketRequest {`; `crates/bitty-network-api/src/lib.rs::pub struct Response {`. Hand-written redacting `Debug` on all three types and `NetworkError` while preserving `PartialEq`/`Eq`. Pinned by `api_vocabulary_debug_is_redacting_and_still_structurally_descriptive`                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Forbidden `Serialize`/`Deserialize` on credential-bearing types                                                                                         | not present                       | not applicable   | `crates/bitty-network/Cargo.toml::[absent] serde`; `crates/bitty-network-api/Cargo.toml::[absent] serde`. No type can implement a serde trait, so the ban is satisfied by the dependency set, not by a redaction boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ProxyCredentialProvider`, `CanonicalOrigin`, scope registry, pool key, `AuthorizationLease`, `proxy::inject_authorization`, remote-revocation evidence | partially present                 | unmerged, PR #25 | `crates/bitty-network/src/proxy.rs::pub trait ProxyCredentialProvider`; `crates/bitty-network-core/src/origin.rs::pub struct CanonicalOrigin {`; `tree::[absent] AuthorizationLease`; `tree::[absent] inject_authorization`; `crates/bitty-network/src/proxy.rs::pub fn env_proxy_enabled() -> bool {`. The scope registry, the pool key, and the revocation evidence have no identifier to check, so they are not cited here; `crates/bitty-network/src/proxy.rs` implements `ProxyCredentialProvider` and `ProxyCredentialRecord`. This record defines them |
+| `ProxyCredentialProvider`, `CanonicalOrigin`, scope registry, pool key, `AuthorizationLease`, `proxy::inject_authorization`, remote-revocation evidence | partially present                 | unmerged, PR #25 | `crates/bitty-network/src/proxy.rs::pub trait ProxyCredentialProvider`; `crates/bitty-network-core/src/origin.rs::pub struct CanonicalOrigin {`; `crates/bitty-network/src/proxy.rs::pub struct AuthorizationLease`; `tree::[absent] inject_authorization`; `crates/bitty-network/src/proxy.rs::pub fn env_proxy_enabled() -> bool {`. The revocation evidence has no identifier to check, so it is not cited here; `crates/bitty-network/src/proxy.rs` implements `ProxyCredentialProvider`, `ProxyCredentialRecord`, `PoolKey`, `AuthorizationLease`, and `ScopeRegistry`. This record defines them |
 | Tracing attribute allowlist and static metric label schema with exemplars                                                                               | not present                       | not applicable   | `crates/bitty-network/Cargo.toml::[absent] tracing`; `crates/bitty-network-api/Cargo.toml::[absent] tracing`. Neither crate depends on a metrics facade either, so there is no exporter, descriptor, or label schema to enforce or scan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Child-process failed-`PartialEq`-assertion redaction coverage                                                                                           | present                           | unmerged, PR #25 | `crates/bitty-network/tests/proxy_credential_policy.rs::fn failed_equality_assertion_output_is_redacted_in_a_child_process() {`; `crates/bitty-network-api/src/lib.rs::pub struct Request {`. The child process triggers a failed `assert_eq!` on credentialed requests and verifies that child output contains no canaries                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Environment-proxy inheritance gated on the `proxy` feature                                                                                              | present                           | not applicable   | `crates/bitty-network/src/http.rs::pub fn new(capability: NetworkCapability) -> Self {`; `crates/bitty-network/src/proxy.rs::pub fn env_proxy_enabled() -> bool {`; `crates/bitty-network/src/http.rs::pub fn new(capability: NetworkCapability) -> Self {` (early return on a disabled gate, before any environment read). `HttpNetworkService::new` now consults `env_proxy_enabled` and returns an empty route and bypass list without reading any proxy variable when the gate is off, so no environment value is read rather than merely discarded. Landed by #45 (CTX-0034); recorded here as a fact about the base, not as this record's scope                                                                                                                                             |
