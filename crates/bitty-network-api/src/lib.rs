@@ -261,7 +261,7 @@ impl OfflineFirst {
 }
 
 /// Typed network failure for current and future network consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum NetworkError {
     /// The domain is not on the capability allowlist.
     Denied {
@@ -302,10 +302,32 @@ pub enum NetworkError {
     },
 }
 
+impl fmt::Debug for NetworkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied { domain } => f
+                .debug_struct("Denied")
+                .field("domain", &safe_domain(domain))
+                .finish(),
+            Self::Offline => write!(f, "Offline"),
+            Self::Timeout { after } => f.debug_struct("Timeout").field("after", after).finish(),
+            Self::Budget { limit_bytes } => f
+                .debug_struct("Budget")
+                .field("limit_bytes", limit_bytes)
+                .finish(),
+            Self::CountBudget { limit_items } => f
+                .debug_struct("CountBudget")
+                .field("limit_items", limit_items)
+                .finish(),
+            Self::Tls { reason } => f.debug_struct("Tls").field("reason", reason).finish(),
+        }
+    }
+}
+
 impl fmt::Display for NetworkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Denied { domain } => write!(f, "network denied: {domain}"),
+            Self::Denied { domain } => write!(f, "network denied: {}", safe_domain(domain)),
             Self::Offline => write!(f, "network offline"),
             Self::Timeout { after } => {
                 write!(f, "network timeout after {}ms", after.as_millis())
@@ -737,7 +759,16 @@ pub fn is_exact_identity_host(host: &str) -> bool {
     is_exact_host_candidate(host.trim().trim_end_matches('.'))
 }
 
-impl std::error::Error for NetworkError {}
+impl std::error::Error for NetworkError {
+    /// Explicit `None`: `NetworkError` carries no retained source error.
+    ///
+    /// The authenticated-proxy decision (#25) requires error types on
+    /// credential-bearing paths to carry no raw transport or third-party source
+    /// whose error chain can hold a URL or authorization header.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
 
 /// HTTP method for [`Request`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -763,7 +794,7 @@ pub enum HttpMethod {
 /// A value of this type describes intent only; executing it is the
 /// [`NetworkService`] implementor's job. Check
 /// [`NetworkCapability::check`] on [`Request::host`] before sending.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Request {
     /// Request method.
     pub method: HttpMethod,
@@ -783,6 +814,27 @@ pub struct Request {
     /// the backend's mandatory ceiling applies; a `Some` value may narrow
     /// that ceiling but never widens it.
     pub max_body_bytes: Option<u64>,
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &redact_url(&self.url))
+            .field("header_count", &self.headers.len())
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| (name.as_str(), "[redacted]"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("body_len", &self.body.len())
+            .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .finish()
+    }
 }
 
 impl Request {
@@ -861,7 +913,7 @@ impl Request {
 /// HTTP response vocabulary (no I/O).
 ///
 /// Produced by [`NetworkService`] implementors; carries no socket handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Response {
     /// Numeric status code (for example `200`).
     pub status: u16,
@@ -869,6 +921,24 @@ pub struct Response {
     pub headers: Vec<(String, String)>,
     /// Response body bytes.
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("header_count", &self.headers.len())
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| (name.as_str(), "[redacted]"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl Response {
@@ -892,7 +962,7 @@ impl Response {
 ///
 /// Describes the upgrade handshake only; the established stream type is the
 /// implementor's [`NetworkService::Socket`] associated type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WebSocketRequest {
     /// Full URL (for example `wss://example.com/socket`).
     pub url: String,
@@ -900,6 +970,17 @@ pub struct WebSocketRequest {
     pub protocols: Vec<String>,
     /// Handshake deadline, when the caller sets one.
     pub timeout: Option<Duration>,
+}
+
+impl fmt::Debug for WebSocketRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebSocketRequest")
+            .field("url", &redact_url(&self.url))
+            .field("protocol_count", &self.protocols.len())
+            .field("protocols", &vec!["[redacted]"; self.protocols.len()])
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl WebSocketRequest {
@@ -1050,6 +1131,44 @@ fn url_host(url: &str) -> &str {
             None => hostport,
         }
     }
+}
+
+/// Render `domain` for diagnostics and errors, or `[invalid-host]` when it
+/// carries control bytes, userinfo residue (`@`), or invalid delimiters.
+fn safe_domain(domain: &str) -> &str {
+    if domain.is_empty() {
+        return "[invalid-host]";
+    }
+    let safe = domain.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'%' | b':' | b'[' | b']')
+    });
+    if safe { domain } else { "[invalid-host]" }
+}
+
+/// Redact `url` to `scheme://host:port/path`, dropping userinfo, queries, and
+/// fragments for diagnostic output.
+fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        None => return "[redacted-url]".to_owned(),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        return "[redacted-url]".to_owned();
+    }
+    let hostport = match authority.rsplit_once('@') {
+        Some((_, hostport)) => hostport,
+        None => authority,
+    };
+    let clean_path = match path.find(['?', '#']) {
+        Some(idx) => &path[..idx],
+        None => path,
+    };
+    format!("{scheme}://{hostport}{clean_path}")
 }
 
 // --- Inspector feed audit vocabulary --------------------------------------
