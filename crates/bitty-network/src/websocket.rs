@@ -74,6 +74,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use bitty_network_api::{NetworkError, WebSocketRequest};
+use bitty_network_core::CanonicalOrigin;
 use tungstenite::stream::MaybeTlsStream;
 
 /// Default handshake deadline when the caller sets no
@@ -1192,15 +1193,13 @@ fn tunnel_via_proxy(
     deadline: Duration,
     started: Instant,
 ) -> Result<(SocketStream, Vec<u8>), NetworkError> {
-    let (scheme, rest) = proxy_url.split_once("://").ok_or(NetworkError::Offline)?;
-    if scheme.to_lowercase().as_str() != "http" {
+    let proxy_origin = CanonicalOrigin::parse(proxy_url).map_err(|_| NetworkError::Offline)?;
+    if proxy_origin.scheme() != "http" {
         return Err(NetworkError::Offline);
     }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let (proxy_host, proxy_port) = parse_authority(authority, 80)?;
     let proxy_target = WsTarget {
-        host: proxy_host,
-        port: proxy_port,
+        host: proxy_origin.host().to_owned(),
+        port: proxy_origin.port(),
         tls: false,
     };
     let mut stream = dial(&proxy_target, deadline, started)?;

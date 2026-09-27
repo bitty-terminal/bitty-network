@@ -99,6 +99,7 @@ name = "bitty-network-core"
 version = "0.1.0"
 dependencies = [
  "bitty-network-api",
+ "idna",
 ]
 
 [[package]]
