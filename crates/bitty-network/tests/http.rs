@@ -614,6 +614,119 @@ fn environment_proxy_gate_controls_new() {
     }
 }
 
+const UNPARSEABLE_CHILD_TEST: &str =
+    "unparseable_https_proxy_environment_fails_closed_without_direct_fallback";
+const UNPARSEABLE_CHILD_MODE: &str = "BITTY_NETWORK_UNPARSEABLE_CHILD_MODE";
+const UNPARSEABLE_CHILD_ORIGIN: &str = "BITTY_NETWORK_UNPARSEABLE_CHILD_ORIGIN";
+const UNPARSEABLE_CHILD_PROXY: &str = "BITTY_NETWORK_UNPARSEABLE_CHILD_PROXY";
+
+fn run_unparseable_proxy_child() -> bool {
+    let Ok(mode) = std::env::var(UNPARSEABLE_CHILD_MODE) else {
+        return false;
+    };
+    assert_eq!(mode, "1", "unknown unparseable proxy child mode");
+    let origin = std::env::var(UNPARSEABLE_CHILD_ORIGIN).expect("unparseable child origin");
+    let proxy_val = std::env::var(UNPARSEABLE_CHILD_PROXY).expect("unparseable child proxy");
+    let service = allow_loopback();
+
+    let mut exposed = vec![format!("{service:?}")];
+    let outcome = service.request(&Request::get(&origin));
+    match (AMBIENT_ENV_APPLIED, outcome) {
+        (true, Err(error)) => {
+            assert_eq!(error, NetworkError::Offline);
+            exposed.push(format!("{error}"));
+            exposed.push(format!("{error:?}"));
+        }
+        (true, Ok(_)) => panic!("unparseable ambient proxy must fail closed"),
+        (false, Ok(response)) => assert_eq!(response.body, DIRECT_BODY),
+        (false, Err(_)) => panic!("gate-off service must egress directly"),
+    }
+    assert!(
+        exposed.iter().all(|value| !value.contains(&proxy_val)),
+        "unparseable proxy URL was retained in observable output"
+    );
+    if AMBIENT_ENV_APPLIED {
+        let debug_repr = format!("{service:?}");
+        assert!(
+            debug_repr.contains("proxy_rejected: true"),
+            "service Debug must reflect proxy_rejected: true"
+        );
+        assert!(
+            debug_repr.contains("proxy_configured: false"),
+            "service Debug must reflect proxy_configured: false"
+        );
+        let second = service.request(&Request::get("http://127.0.0.1:1/nonexistent"));
+        assert_eq!(
+            second.err(),
+            Some(NetworkError::Offline),
+            "subsequent request on poisoned service must also fail closed"
+        );
+    }
+    true
+}
+
+/// An unparseable `HTTPS_PROXY` (or `https_proxy`) environment configuration
+/// must poison service construction, fail every request closed, retain no URL,
+/// and never fall back to direct egress.
+#[test]
+fn unparseable_https_proxy_environment_fails_closed_without_direct_fallback() {
+    if run_unparseable_proxy_child() {
+        return;
+    }
+
+    for variable in ["HTTPS_PROXY", "https_proxy"] {
+        let origin = Probe::start(|_| ok_response(DIRECT_BODY));
+        let unparseable_url = "://malformed-proxy-url";
+
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .arg(UNPARSEABLE_CHILD_TEST)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(UNPARSEABLE_CHILD_MODE, "1")
+            .env(UNPARSEABLE_CHILD_ORIGIN, origin.url("/from-origin"))
+            .env(UNPARSEABLE_CHILD_PROXY, unparseable_url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in PROXY_ENV_VARS {
+            command.env_remove(name);
+        }
+        for name in PROXY_BYPASS_VARS {
+            command.env_remove(name);
+        }
+        command.env(variable, unparseable_url);
+
+        let output = spawn_bounded_child(&mut command);
+        let origin_hits = origin.hits();
+        origin.stop_and_join();
+
+        let captured = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !captured.contains(unparseable_url),
+            "unparseable proxy URL reached child output"
+        );
+        assert!(
+            output.status.success(),
+            "unparseable proxy child process failed for {variable}: {captured}"
+        );
+        if AMBIENT_ENV_APPLIED {
+            assert_eq!(
+                origin_hits, 0,
+                "an unparseable {variable} fell back to direct egress"
+            );
+        } else {
+            assert_eq!(
+                origin_hits, 1,
+                "gate-off service must reach the origin directly"
+            );
+        }
+    }
+}
+
 #[test]
 fn timeout_fails_closed_with_typed_error() {
     let probe = Probe::start(|_| {

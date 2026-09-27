@@ -1351,6 +1351,29 @@ mod tests {
         assert!(!format!("{error:?}").contains("fixture-user"));
     }
 
+    #[test]
+    fn explicit_credentialed_proxy_is_rejected_before_retaining_or_dialing() {
+        use std::io::ErrorKind;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let port = listener.local_addr().expect("loopback addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("listener nonblocking");
+        let proxy_url = format!("http://fixture-user:fixture-pass@127.0.0.1:{port}/");
+        let error = HttpNetworkService::with_proxy(
+            NetworkCapability::offline().with_domain("127.0.0.1"),
+            &proxy_url,
+        )
+        .expect_err("credentialed proxy must fail closed");
+        assert_eq!(error, NetworkError::Offline);
+        match listener.accept() {
+            Err(error) => assert_eq!(error.kind(), ErrorKind::WouldBlock),
+            Ok(_) => panic!("rejected credentialed proxy URL was dialed"),
+        }
+    }
+
     /// Serve `body` once over loopback and return its URL.
     ///
     /// Binds an ephemeral port (never a fixed one); `with_length` decides

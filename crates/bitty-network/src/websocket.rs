@@ -2820,23 +2820,31 @@ mod tests {
 
     #[test]
     fn authenticated_proxy_is_rejected_before_dial() {
-        let (listener, port) = bind_loopback();
-        let proxy_url = format!("http://fixture-user:fixture-pass@127.0.0.1:{port}/");
+        let (proxy_listener, proxy_port) = bind_loopback();
+        let (dest_listener, dest_port) = bind_loopback();
+        let proxy_url = format!("http://fixture-user:fixture-pass@127.0.0.1:{proxy_port}/");
         let target = WsTarget {
             host: "127.0.0.1".to_owned(),
-            port: closed_port(),
+            port: dest_port,
             tls: false,
         };
         assert_eq!(
             tunnel_via_proxy(&proxy_url, &target, Duration::from_secs(2), Instant::now()).err(),
             Some(NetworkError::Offline)
         );
-        listener
+        proxy_listener
             .set_nonblocking(true)
-            .expect("auth listener nonblocking");
-        match listener.accept() {
+            .expect("auth proxy listener nonblocking");
+        match proxy_listener.accept() {
             Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
             Ok(_) => panic!("authenticated proxy URL was dialed"),
+        }
+        dest_listener
+            .set_nonblocking(true)
+            .expect("dest listener nonblocking");
+        match dest_listener.accept() {
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+            Ok(_) => panic!("target destination was dialed"),
         }
     }
 
