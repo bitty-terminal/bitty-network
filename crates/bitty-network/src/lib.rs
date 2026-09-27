@@ -71,7 +71,9 @@ pub mod transport;
 pub mod websocket;
 
 // Re-export core modules from bitty-network-core
-pub use bitty_network_core::{diagnostics, policy, protocol, runtime};
+pub use bitty_network_core::{
+    CanonicalOrigin, CanonicalOriginError, diagnostics, origin, policy, protocol, runtime,
+};
 
 #[cfg(feature = "http")]
 pub use crate::http::HttpNetworkService;

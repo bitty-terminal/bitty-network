@@ -5,18 +5,23 @@
 //!
 //! - [`diagnostics`]: Redacted diagnostic snapshots for logs and errors that
 //!   strip secrets while preserving correlation data.
+//! - [`origin`]: Canonical origin parser, closed default-port table, and
+//!   IDNA / IP-literal normalization ([`CanonicalOrigin`]).
 //! - [`policy`]: Re-exports of policy vocabulary from `bitty-network-api`.
 //! - [`protocol`]: Protocol markers (HTTP, WebSocket) and bounded subprotocol
 //!   negotiation helpers.
 //! - [`runtime`]: Runtime ownership shell (marker for future executor).
 //!
-//! This crate is dependency-minimal: it depends only on `bitty-network-api`
-//! and the Rust standard library. All modules are pure, perform no I/O, spawn
-//! no background tasks, and open no sockets.
+//! This crate is dependency-minimal: it depends only on `bitty-network-api`,
+//! `idna`, and the Rust standard library. All modules are pure, perform no I/O,
+//! spawn no background tasks, and open no sockets.
 
 #![forbid(unsafe_code)]
 
 pub mod diagnostics;
+pub mod origin;
 pub mod policy;
 pub mod protocol;
 pub mod runtime;
+
+pub use origin::{CanonicalOrigin, CanonicalOriginError};

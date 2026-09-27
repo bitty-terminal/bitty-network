@@ -121,6 +121,7 @@ use bitty_network_api::{
     HttpMethod, NetworkCapability, NetworkError, NetworkService, Request, Response,
     WebSocketRequest,
 };
+use bitty_network_core::CanonicalOrigin;
 use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::tls::{TlsProvider, TlsTransport};
@@ -751,6 +752,8 @@ impl HttpNetworkService {
                         return Err(NetworkError::Offline);
                     }
                     let destination = resolve_redirect(&url, &target);
+                    let _destination_origin =
+                        CanonicalOrigin::parse(&destination).map_err(|_| NetworkError::Offline)?;
                     if !same_origin(&url, &destination) {
                         strip_cross_origin_headers(&mut headers);
                     }
@@ -962,24 +965,16 @@ fn is_absolute_url(location: &str) -> bool {
 
 /// True when both URLs share scheme, host, and effective port.
 ///
-/// Host comparison is case-insensitive; ports come from the same
-/// best-effort rule as [`Request::port`], so an explicit default port and
-/// its scheme default count as the same origin.
+/// Compares canonical origins via [`CanonicalOrigin`]: scheme, IDNA/IP-normalized
+/// host, and effective port from the closed default-port table. Fails closed
+/// (returns `false`) if either URL fails to parse as a canonical origin.
 fn same_origin(first: &str, second: &str) -> bool {
-    let first_request = Request::get(first);
-    let second_request = Request::get(second);
-    url_scheme(first).eq_ignore_ascii_case(url_scheme(second))
-        && first_request
-            .host()
-            .eq_ignore_ascii_case(second_request.host())
-        && first_request.port() == second_request.port()
-}
-
-/// Best-effort scheme of a URL: the text before `://`, else empty.
-fn url_scheme(url: &str) -> &str {
-    match url.split_once("://") {
-        Some((scheme, _)) => scheme,
-        None => "",
+    match (
+        CanonicalOrigin::parse(first),
+        CanonicalOrigin::parse(second),
+    ) {
+        (Ok(first_origin), Ok(second_origin)) => first_origin == second_origin,
+        _ => false,
     }
 }
 
