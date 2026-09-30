@@ -55,6 +55,8 @@ const TAG_INTEGER: u8 = 0x02;
 const TAG_BIT_STRING: u8 = 0x03;
 /// Tag: `OCTET STRING`.
 const TAG_OCTET_STRING: u8 = 0x04;
+/// Tag: `NULL`.
+const TAG_NULL: u8 = 0x05;
 /// Tag: `OBJECT IDENTIFIER`.
 const TAG_OID: u8 = 0x06;
 /// Tag: `UTCTime`.
@@ -124,12 +126,9 @@ const OID_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x0f];
 /// certificates and is absent here on purpose: a trust anchor signed with
 /// SHA-1 is not a control worth keeping, and refusing it fails closed.
 const ADMITTED_SIGNATURE_ALGORITHMS: [&[u8]; 8] = [
-    // sha256WithRSAEncryption (1.2.840.113549.1.1.11).
-    &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b],
-    // sha384WithRSAEncryption (1.2.840.113549.1.1.12).
-    &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c],
-    // sha512WithRSAEncryption (1.2.840.113549.1.1.13).
-    &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d],
+    OID_SHA256_RSA,
+    OID_SHA384_RSA,
+    OID_SHA512_RSA,
     // ecdsa-with-SHA256 (1.2.840.10045.4.3.2).
     &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02],
     // ecdsa-with-SHA384 (1.2.840.10045.4.3.3).
@@ -138,9 +137,23 @@ const ADMITTED_SIGNATURE_ALGORITHMS: [&[u8]; 8] = [
     &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04],
     // Ed25519 (1.3.101.112).
     OID_ED25519,
-    // RSASSA-PSS (1.2.840.113549.1.1.10), gated on its hash parameters.
-    &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a],
+    // RSASSA-PSS, gated on its hash parameters.
+    OID_RSASSA_PSS,
 ];
+
+/// `sha256WithRSAEncryption` (1.2.840.113549.1.1.11).
+const OID_SHA256_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+/// `sha384WithRSAEncryption` (1.2.840.113549.1.1.12).
+const OID_SHA384_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c];
+/// `sha512WithRSAEncryption` (1.2.840.113549.1.1.13).
+const OID_SHA512_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d];
+/// `RSASSA-PSS` (1.2.840.113549.1.1.10).
+const OID_RSASSA_PSS: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
+
+/// The PKCS #1 v1.5 RSA signature OIDs in the admitted set. RFC 4055 2.1 says
+/// their parameters MUST be NULL, and RFC 5280 readers accept them absent too,
+/// so these two shapes (and only these) are admitted.
+const RSA_PKCS1_SIGNATURE_ALGORITHMS: [&[u8]; 3] = [OID_SHA256_RSA, OID_SHA384_RSA, OID_SHA512_RSA];
 
 /// `sha1WithRSAEncryption` (1.2.840.113549.1.1.5): named by RFC 5280 for
 /// legacy certificates and absent from the admitted set, so it is a policy
@@ -611,6 +624,12 @@ fn read_validity(tbs: &mut Der<'_>) -> Result<Validity, RootRejection> {
 /// offset. Anything else is refused rather than interpreted, so a certificate
 /// cannot smuggle in a local-time window this crate would silently shift.
 fn read_time(tag: u8, contents: &[u8]) -> Option<SystemTime> {
+    // Every accepted form is ASCII digits plus `Z`. Refusing anything else up
+    // front keeps the fixed-offset slicing below on character boundaries: a
+    // multibyte UTF-8 sequence would otherwise make `&text[0..2]` panic.
+    if !contents.is_ascii() {
+        return None;
+    }
     let text = std::str::from_utf8(contents).ok()?;
     if !text.ends_with('Z') {
         return None;
@@ -743,7 +762,7 @@ fn read_public_key(tbs: &mut Der<'_>) -> Result<(), RootRejection> {
     let mut spki = tbs.expect_value(TAG_SEQUENCE)?;
     let mut algorithm = spki.expect_value(TAG_SEQUENCE)?;
     let oid = read_oid(&mut algorithm)?;
-    let parameters = algorithm.next().map(|(_, contents)| contents);
+    let parameters = algorithm.next();
     if !algorithm.is_empty() {
         return Err(RootRejection::Malformed);
     }
@@ -761,7 +780,7 @@ fn read_public_key(tbs: &mut Der<'_>) -> Result<(), RootRejection> {
     if oid == OID_RSA_ENCRYPTION {
         // rsaEncryption parameters are NULL when present; any other parameter
         // is a different algorithm wearing the same OID.
-        if parameters.is_some_and(|value| value != [0x05, 0x00]) {
+        if !parameters_absent_or_null(parameters) {
             return Err(RootRejection::UnsupportedPublicKeyAlgorithm);
         }
         return match rsa_modulus_bits(key) {
@@ -774,7 +793,7 @@ fn read_public_key(tbs: &mut Der<'_>) -> Result<(), RootRejection> {
         // `id-ecPublicKey` names its curve *in* the parameters field, as the
         // named-curve OID's own content octets rather than a nested TLV, so the
         // comparison is against those octets directly.
-        let curve = parameters.ok_or(RootRejection::UnsupportedPublicKeyAlgorithm)?;
+        let (_, curve) = parameters.ok_or(RootRejection::UnsupportedPublicKeyAlgorithm)?;
         return match SUPPORTED_ECDSA_CURVES.iter().find(|(oid, _)| *oid == curve) {
             Some((_, bits)) if *bits >= MIN_ECDSA_CURVE_BITS => Ok(()),
             Some(_) => Err(RootRejection::WeakPublicKey),
@@ -836,12 +855,26 @@ fn algorithms_agree(inner: &Der<'_>, outer: &Der<'_>) -> bool {
     }
 }
 
+/// One `AlgorithmIdentifier` parameters element as `(tag, contents)`.
+///
+/// The tag is kept because the contents alone cannot tell a DER `NULL`
+/// (`05 00`, empty contents) from any other empty value.
+type AlgorithmParameters<'a> = (u8, &'a [u8]);
+
 /// The algorithm OID of one `AlgorithmIdentifier`, with its parameters.
-fn algorithm_oid<'a>(algorithm: &Der<'a>) -> Option<(&'a [u8], Option<&'a [u8]>)> {
+fn algorithm_oid<'a>(algorithm: &Der<'a>) -> Option<(&'a [u8], Option<AlgorithmParameters<'a>>)> {
     let mut body = Der::read(algorithm.input);
     let oid = read_oid(&mut body).ok()?;
-    let parameters = body.next().map(|(_, contents)| contents);
+    let parameters = body.next();
     body.is_empty().then_some((oid, parameters))
+}
+
+/// True when `parameters` are absent or exactly a DER `NULL`.
+fn parameters_absent_or_null(parameters: Option<AlgorithmParameters<'_>>) -> bool {
+    match parameters {
+        None => true,
+        Some((tag, contents)) => tag == TAG_NULL && contents.is_empty(),
+    }
 }
 
 /// Whether `algorithm` is a signature algorithm this crate admits.
@@ -858,32 +891,47 @@ fn signature_algorithm_admitted(algorithm: &Der<'_>) -> bool {
     if !ADMITTED_SIGNATURE_ALGORITHMS.contains(&oid) {
         return false;
     }
-    match parameters {
-        // Every other admitted OID takes no parameters that change the
-        // decision, and an unexpected parameter shape is caught by
-        // `algorithm_oid` refusing a trailing element.
-        None => true,
-        Some(parameters) => pss_hash_admitted(parameters),
+    if oid == OID_RSASSA_PSS {
+        // PSS names its hash in a `RSASSA-PSS-params` SEQUENCE; absent
+        // parameters default to SHA-1 and are refused.
+        return match parameters {
+            Some((TAG_SEQUENCE, contents)) => pss_hash_admitted(contents),
+            _ => false,
+        };
     }
+    if RSA_PKCS1_SIGNATURE_ALGORITHMS.contains(&oid) {
+        return parameters_absent_or_null(parameters);
+    }
+    // ECDSA (RFC 5758 3.2) and Ed25519 (RFC 8410 3) take no parameters at
+    // all, so any parameters element is refused.
+    parameters.is_none()
 }
 
 /// Whether `RSASSA-PSS-params` name an admitted hash.
 ///
 /// `RSASSA-PSS-params ::= SEQUENCE { hashAlgorithm [0] HashAlgorithm DEFAULT
-/// sha1, ... }`, so the hash is the first, explicitly tagged field. Absent
-/// parameters mean SHA-1, so they are not admitted.
+/// sha1, ... }` (RFC 4055 3.1), so the hash is the first field, explicitly
+/// tagged `[0]`, and wraps a complete `AlgorithmIdentifier` SEQUENCE whose
+/// parameters are `NULL` or absent. A missing `[0]` means the SHA-1 default,
+/// so it is not admitted. The remaining fields are left to the verifier.
 fn pss_hash_admitted(parameters: &[u8]) -> bool {
     let mut params = Der::read(parameters);
-    let Some((_, hash)) = params.next() else {
+    let Some((TAG_CONTEXT_0, explicit)) = params.next() else {
         return false;
     };
-    // [0] EXPLICIT, so the hash follows as its own AlgorithmIdentifier.
-    let mut hash = Der::read(hash);
-    match hash.next() {
-        Some((TAG_OID, contents)) => {
-            hash.is_empty() && [OID_SHA256, OID_SHA384, OID_SHA512].contains(&contents)
+    let mut explicit = Der::read(explicit);
+    let Some((TAG_SEQUENCE, hash_algorithm)) = explicit.next() else {
+        return false;
+    };
+    if !explicit.is_empty() {
+        return false;
+    }
+    match algorithm_oid(&Der::read(hash_algorithm)) {
+        Some((oid, hash_parameters)) => {
+            [OID_SHA256, OID_SHA384, OID_SHA512].contains(&oid)
+                && parameters_absent_or_null(hash_parameters)
         }
-        _ => false,
+        None => false,
     }
 }
 
@@ -1459,6 +1507,284 @@ mod tests {
         assert!(!ADMITTED_SIGNATURE_ALGORITHMS.contains(&OID_SHA1_RSA));
         // The PSS hash OIDs are not signature OIDs; they gate PSS parameters.
         assert!(!ADMITTED_SIGNATURE_ALGORITHMS.contains(&OID_SHA256));
+    }
+
+    /// One DER triple with a short- or long-form length, for fixtures larger
+    /// than [`tlv`] allows (an RSA modulus is 257 octets).
+    fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
+        let length = contents.len();
+        let mut out = vec![tag];
+        if length < 0x80 {
+            out.push(length as u8);
+        } else {
+            let width: Vec<u8> = length
+                .to_be_bytes()
+                .into_iter()
+                .skip_while(|byte| *byte == 0)
+                .collect();
+            out.push(0x80 | width.len() as u8);
+            out.extend_from_slice(&width);
+        }
+        out.extend_from_slice(contents);
+        out
+    }
+
+    /// DER `NULL`: tag `0x05`, zero-length contents.
+    const DER_NULL: [u8; 2] = [TAG_NULL, 0x00];
+
+    /// A DER `RSAPublicKey` whose modulus has exactly `bits` significant bits
+    /// (a multiple of eight), with the sign pad DER requires.
+    fn rsa_public_key(bits: usize) -> Vec<u8> {
+        let mut modulus = vec![0x00, 0x80];
+        modulus.resize(bits / 8 + 1, 0x01);
+        der(
+            TAG_SEQUENCE,
+            &[
+                der(TAG_INTEGER, &modulus),
+                der(TAG_INTEGER, &[0x01, 0x00, 0x01]),
+            ]
+            .concat(),
+        )
+    }
+
+    /// A `SubjectPublicKeyInfo` for `rsaEncryption` with the given raw
+    /// parameters element (empty for absent) and modulus size.
+    fn rsa_spki(parameters: &[u8], bits: usize) -> Vec<u8> {
+        let algorithm = der(
+            TAG_SEQUENCE,
+            &[der(TAG_OID, OID_RSA_ENCRYPTION), parameters.to_vec()].concat(),
+        );
+        let key = der(
+            TAG_BIT_STRING,
+            &[&[0x00][..], &rsa_public_key(bits)].concat(),
+        );
+        der(TAG_SEQUENCE, &[algorithm, key].concat())
+    }
+
+    fn admit_spki(spki: &[u8]) -> Result<(), RootRejection> {
+        read_public_key(&mut Der::read(spki))
+    }
+
+    /// `rsaEncryption` parameters are a DER `NULL` in practice (RFC 3279
+    /// 2.3.1). The reader sees `NULL` as tag `0x05` with *empty* contents, so
+    /// a check on the contents alone can never match `05 00`; the tag has to
+    /// be part of the decision. Absent parameters stay admitted, and every
+    /// other parameters element is still refused.
+    #[test]
+    fn rsa_public_key_admits_null_or_absent_parameters_only() {
+        assert_eq!(
+            admit_spki(&rsa_spki(&DER_NULL, MIN_RSA_MODULUS_BITS as usize)),
+            Ok(())
+        );
+        assert_eq!(
+            admit_spki(&rsa_spki(&[], MIN_RSA_MODULUS_BITS as usize)),
+            Ok(())
+        );
+        // NULL parameters still reach the size floor.
+        assert_eq!(
+            admit_spki(&rsa_spki(&DER_NULL, MIN_RSA_MODULUS_BITS as usize - 8)),
+            Err(RootRejection::WeakPublicKey)
+        );
+        for (parameters, why) in [
+            (
+                tlv(TAG_OCTET_STRING, &[]),
+                "an empty non-NULL value (same contents as NULL)",
+            ),
+            (tlv(TAG_NULL, &[0x00]), "a NULL with contents"),
+            (tlv(TAG_OID, OID_SHA256), "an OID"),
+            (tlv(TAG_SEQUENCE, &[]), "an empty SEQUENCE"),
+        ] {
+            assert_eq!(
+                admit_spki(&rsa_spki(&parameters, MIN_RSA_MODULUS_BITS as usize)),
+                Err(RootRejection::UnsupportedPublicKeyAlgorithm),
+                "{why} must be refused as rsaEncryption parameters"
+            );
+        }
+    }
+
+    /// `AlgorithmIdentifier` contents: `OID` followed by a raw parameters
+    /// element (empty for absent).
+    fn signature_algorithm(oid: &[u8], parameters: &[u8]) -> Vec<u8> {
+        [tlv(TAG_OID, oid), parameters.to_vec()].concat()
+    }
+
+    fn signature_admitted(oid: &[u8], parameters: &[u8]) -> bool {
+        signature_algorithm_admitted(&Der::read(&signature_algorithm(oid, parameters)))
+    }
+
+    /// PKCS #1 v1.5 RSA signatures carry `NULL` parameters (RFC 4055 2.1), and
+    /// that must be admitted rather than routed through the PSS parameter
+    /// check. Nothing else widens: other parameter shapes, parameters on ECDSA
+    /// or Ed25519, absent PSS parameters (SHA-1 by default), and SHA-1 RSA with
+    /// `NULL` are all refused.
+    #[test]
+    fn rsa_signature_algorithms_admit_null_or_absent_parameters_only() {
+        for oid in RSA_PKCS1_SIGNATURE_ALGORITHMS {
+            assert!(signature_admitted(oid, &DER_NULL), "{oid:02x?} with NULL");
+            assert!(signature_admitted(oid, &[]), "{oid:02x?} absent");
+            assert!(
+                !signature_admitted(oid, &tlv(TAG_OCTET_STRING, &[])),
+                "{oid:02x?} with an empty non-NULL value"
+            );
+            assert!(
+                !signature_admitted(oid, &tlv(TAG_NULL, &[0x00])),
+                "{oid:02x?} with a NULL carrying contents"
+            );
+        }
+        assert!(!signature_admitted(OID_SHA1_RSA, &DER_NULL));
+
+        let ecdsa_sha256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+        assert!(signature_admitted(ecdsa_sha256, &[]));
+        assert!(!signature_admitted(ecdsa_sha256, &DER_NULL));
+        assert!(signature_admitted(OID_ED25519, &[]));
+        assert!(!signature_admitted(OID_ED25519, &DER_NULL));
+
+        assert!(!signature_admitted(OID_RSASSA_PSS, &[]));
+        assert!(!signature_admitted(OID_RSASSA_PSS, &DER_NULL));
+    }
+
+    /// `id-sha1` (1.3.14.3.2.26): the PSS default hash, refused by policy.
+    const OID_SHA1: &[u8] = &[0x2b, 0x0e, 0x03, 0x02, 0x1a];
+
+    /// `RSASSA-PSS-params` whose `[0]` wraps `hash_algorithm` contents, plus
+    /// any trailing fields, as a complete parameters element.
+    fn pss_params(hash_algorithm: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let explicit = tlv(TAG_CONTEXT_0, &tlv(TAG_SEQUENCE, hash_algorithm));
+        tlv(TAG_SEQUENCE, &[explicit, trailing.to_vec()].concat())
+    }
+
+    /// RFC 4055 3.1: the `[0]` field wraps a full `AlgorithmIdentifier`
+    /// SEQUENCE. Only SHA-256/384/512 with `NULL` or absent parameters are
+    /// admitted; the SHA-1 default, a bare OID inside `[0]` (the shape the
+    /// reader used to expect), other tags, and trailing elements are refused.
+    #[test]
+    fn pss_admits_only_a_well_formed_sha2_hash_algorithm() {
+        // maskGenAlgorithm [1] { mgf1 { sha256 } } and saltLength [2] 32, as a
+        // conforming encoder emits them; left to the verifier.
+        let mgf1: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08];
+        let mask_gen = tlv(
+            0xa1,
+            &tlv(
+                TAG_SEQUENCE,
+                &[
+                    tlv(TAG_OID, mgf1),
+                    tlv(
+                        TAG_SEQUENCE,
+                        &[tlv(TAG_OID, OID_SHA256), DER_NULL.to_vec()].concat(),
+                    ),
+                ]
+                .concat(),
+            ),
+        );
+        let salt = tlv(0xa2, &tlv(TAG_INTEGER, &[0x20]));
+        let trailing = [mask_gen, salt].concat();
+
+        for hash in [OID_SHA256, OID_SHA384, OID_SHA512] {
+            let with_null = [tlv(TAG_OID, hash), DER_NULL.to_vec()].concat();
+            assert!(
+                signature_admitted(OID_RSASSA_PSS, &pss_params(&with_null, &trailing)),
+                "{hash:02x?} with NULL"
+            );
+            assert!(
+                signature_admitted(OID_RSASSA_PSS, &pss_params(&tlv(TAG_OID, hash), &[])),
+                "{hash:02x?} with absent parameters"
+            );
+        }
+
+        let sha256 = tlv(TAG_OID, OID_SHA256);
+        for (parameters, why) in [
+            (
+                pss_params(&[tlv(TAG_OID, OID_SHA1), DER_NULL.to_vec()].concat(), &[]),
+                "SHA-1 named explicitly",
+            ),
+            (tlv(TAG_SEQUENCE, &[]), "empty params (SHA-1 default)"),
+            (
+                tlv(TAG_SEQUENCE, &trailing),
+                "hashAlgorithm missing, params start at [1]",
+            ),
+            (
+                tlv(TAG_SEQUENCE, &tlv(TAG_CONTEXT_0, &sha256)),
+                "a bare OID inside [0]",
+            ),
+            (
+                tlv(TAG_SEQUENCE, &tlv(0xa1, &tlv(TAG_SEQUENCE, &sha256))),
+                "the hash under a tag other than [0]",
+            ),
+            (
+                tlv(
+                    TAG_SEQUENCE,
+                    &tlv(
+                        TAG_CONTEXT_0,
+                        &[tlv(TAG_SEQUENCE, &sha256), DER_NULL.to_vec()].concat(),
+                    ),
+                ),
+                "trailing garbage inside [0]",
+            ),
+            (
+                pss_params(&[sha256.clone(), tlv(TAG_OCTET_STRING, &[])].concat(), &[]),
+                "non-NULL hash parameters",
+            ),
+            (
+                pss_params(
+                    &[sha256.clone(), DER_NULL.to_vec(), DER_NULL.to_vec()].concat(),
+                    &[],
+                ),
+                "two hash parameters elements",
+            ),
+        ] {
+            assert!(!signature_admitted(OID_RSASSA_PSS, &parameters), "{why}");
+        }
+    }
+
+    /// A real RSA CA, as generated by a conforming encoder, is admitted end to
+    /// end: `rsaEncryption` and `sha256WithRSAEncryption` both carry DER `NULL`
+    /// parameters, which the reader used to refuse on both fields.
+    #[test]
+    fn a_real_rsa_ca_with_null_parameters_is_admitted() {
+        let key = KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).expect("runtime RSA test key");
+        let certificate = params(
+            IsCa::Ca(BasicConstraints::Unconstrained),
+            vec![KeyUsagePurpose::KeyCertSign],
+            WINDOW_FROM(),
+            WINDOW_UNTIL(),
+        )
+        .self_signed(&key)
+        .expect("self-signed RSA test certificate");
+        let der = certificate.der().to_vec();
+        // The fixture really carries the NULL parameters under test, so the
+        // admission below is not passing through the absent-parameters arm.
+        let null_after = |oid: &[u8]| {
+            let needle = [tlv(TAG_OID, oid), DER_NULL.to_vec()].concat();
+            der.windows(needle.len())
+                .any(|window| window == needle.as_slice())
+        };
+        assert!(null_after(OID_RSA_ENCRYPTION), "SPKI carries NULL");
+        assert!(null_after(OID_SHA256_RSA), "signature carries NULL");
+        assert!(admit_root(&der).is_ok(), "{:?}", admit_root(&der));
+    }
+
+    /// Time contents are fixed-offset ASCII. A multibyte UTF-8 character of
+    /// the right total length must be refused, not sliced mid-character.
+    #[test]
+    fn non_ascii_time_is_refused_without_panicking() {
+        for (tag, text) in [
+            // `é` spans bytes 1..3, across the year slice `0..2`.
+            (TAG_UTC_TIME, "0é010100000Z"),
+            // `é` spans bytes 3..5, across the month slice of the remainder.
+            (TAG_UTC_TIME, "250é0100000Z"),
+            // `é` spans bytes 3..5, across the year slice `0..4`.
+            (TAG_GENERALIZED_TIME, "202é010100000Z"),
+        ] {
+            let expected_len = if tag == TAG_UTC_TIME {
+                TIME_UTC_LEN
+            } else {
+                TIME_GENERALIZED_LEN
+            };
+            assert_eq!(text.len(), expected_len, "{text} reaches the slicing");
+            assert_eq!(read_time(tag, text.as_bytes()), None, "{text}");
+        }
+        // The same shape in ASCII still parses, so the refusal is not vacuous.
+        assert!(read_time(TAG_UTC_TIME, b"250101000000Z").is_some());
     }
 
     /// The admitted signature algorithms are exactly the set the module
