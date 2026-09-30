@@ -32,6 +32,8 @@ use std::{
     str::FromStr,
 };
 
+use bitty_network_api::URL_AUTHORITY_DELIMITERS;
+
 /// Errors encountered while parsing a [`CanonicalOrigin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalOriginError {
@@ -167,9 +169,11 @@ impl CanonicalOrigin {
         let default_port =
             default_port_for_scheme(&scheme).ok_or(CanonicalOriginError::UnsupportedScheme)?;
 
-        // The authority component ends at the first '/', '?', or '#'
+        // The authority component ends at the first '/', '?', '#', or '\\'
+        // (WHATWG treats '\\' as '/' for special schemes), matching the
+        // capability check and the dialing client.
         let authority = after_scheme
-            .split(['/', '?', '#'])
+            .split(URL_AUTHORITY_DELIMITERS)
             .next()
             .unwrap_or(after_scheme);
 
@@ -519,6 +523,18 @@ mod tests {
         assert_eq!(
             CanonicalOrigin::parse("http://user@example.com/"),
             Err(CanonicalOriginError::UserinfoDisallowed)
+        );
+    }
+    /// `\` ends the authority for special schemes, as in WHATWG parsing, so the
+    /// canonical origin names the host the client dials rather than the tail
+    /// after a `\@` that only looks like userinfo.
+    #[test]
+    fn backslash_ends_the_authority() {
+        let origin = CanonicalOrigin::parse("https://evil.com\\@allowed.com/")
+            .expect("the authority is evil.com");
+        assert_eq!(
+            origin,
+            CanonicalOrigin::parse("https://evil.com").expect("plain")
         );
     }
 

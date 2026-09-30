@@ -120,7 +120,7 @@ use std::time::{Duration, Instant};
 
 use bitty_network_api::{
     HttpMethod, NetworkCapability, NetworkError, NetworkService, Request, Response,
-    WebSocketRequest,
+    URL_AUTHORITY_DELIMITERS, WebSocketRequest,
 };
 use bitty_network_core::CanonicalOrigin;
 use reqwest::header::{HeaderName, HeaderValue};
@@ -1019,7 +1019,7 @@ fn resolve_redirect(hop_url: &str, location: &str) -> String {
     let Some((scheme, rest)) = hop_url.split_once("://") else {
         return location.to_owned();
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     if location.starts_with('/') {
         return format!("{scheme}://{authority}{location}");
     }

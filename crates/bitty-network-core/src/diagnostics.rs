@@ -27,6 +27,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use bitty_network_api::URL_AUTHORITY_DELIMITERS;
+
 /// Placeholder replacing any redacted value.
 pub const REDACTED: &str = "[redacted]";
 
@@ -51,7 +53,9 @@ pub fn redacted_url(url: &str) -> String {
         Some(parts) => parts,
         None => return REDACTED_URL_VALUE.to_owned(),
     };
-    let (authority, path) = match rest.find('/') {
+    // The authority ends where the capability check's does (including `\\`),
+    // so the redacted host is the host that was checked and dialed.
+    let (authority, path) = match rest.find(URL_AUTHORITY_DELIMITERS) {
         Some(index) => rest.split_at(index),
         None => (rest, ""),
     };
@@ -273,6 +277,15 @@ mod tests {
             ("not-a-url", "[redacted-url]"),
             ("", "[redacted-url]"),
             ("https:///no-authority", "[redacted-url]"),
+            // `\` ends the authority exactly as the capability check reads it.
+            (
+                "https://evil.com\\@allowed.com/",
+                "https://evil.com\\@allowed.com/",
+            ),
+            (
+                "https://example.com?token=SENTINEL-0003",
+                "https://example.com",
+            ),
         ];
         for (raw, expected) in cases {
             assert_eq!(redacted_url(raw), expected, "url: {raw}");

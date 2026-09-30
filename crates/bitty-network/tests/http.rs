@@ -774,6 +774,29 @@ fn capability_denied_never_sends() {
     probe.stop_and_join();
 }
 
+/// `\` ends the authority for `http`/`https` exactly as it does in reqwest's
+/// WHATWG parser, so `http://127.0.0.1:PORT\@allowed.test/` is checked as the
+/// loopback host it would dial. A grant for `allowed.test` must deny it and
+/// the probe must never see a connection.
+#[test]
+fn backslash_userinfo_smuggling_is_denied_before_dialing() {
+    let probe = Probe::start(|_| ok_response(b"must not send"));
+    let capped = HttpNetworkService::new(NetworkCapability::offline().with_domain("allowed.test"));
+    let smuggled = format!("http://127.0.0.1:{}\\@allowed.test/", probe.port);
+
+    assert_eq!(
+        capped.request(&Request::get(smuggled)),
+        Err(NetworkError::Denied {
+            domain: "127.0.0.1".to_owned()
+        })
+    );
+
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(probe.hits(), 0);
+
+    probe.stop_and_join();
+}
+
 #[test]
 fn explicit_proxy_routes_through_proxy() {
     let origin = Probe::start(|_| ok_response(b"origin-direct"));

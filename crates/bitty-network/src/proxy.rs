@@ -378,26 +378,15 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
     /// Invalidate the entry for `key`: marks it inactive, removes from lookup,
     /// cancels existing leases, and waits up to `timeout` for active leases to drain.
     pub fn invalidate(&self, key: &PoolKey, timeout: Duration) -> Result<(), NetworkError> {
-        let entry = {
-            let mut entries = self.entries.write().map_err(|_| NetworkError::Offline)?;
-            entries.remove(key)
-        };
-
-        if let Some(entry) = entry {
-            entry.active.store(false, Ordering::SeqCst);
-            // Wait for active leases to drain
-            let start = Instant::now();
-            while entry.active_leases.load(Ordering::SeqCst) > 0 {
-                if start.elapsed() >= timeout {
-                    return Err(NetworkError::Offline);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-        Ok(())
+        self.invalidate_matching(|candidate| candidate == key, timeout)
     }
 
     /// Invalidate all entries for a given proxy and credential where scope_epoch < new_epoch.
+    ///
+    /// Every matching entry is removed and marked inactive before any drain
+    /// wait starts, so a drain timeout on one entry never leaves another
+    /// matching entry checkout-able. The first drain error is returned after
+    /// every entry has been attempted.
     pub fn invalidate_scope_epoch(
         &self,
         proxy_origin: &CanonicalOrigin,
@@ -405,26 +394,21 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
         new_epoch: u64,
         timeout: Duration,
     ) -> Result<(), NetworkError> {
-        let matching_keys: Vec<PoolKey> = {
-            let entries = self.entries.read().map_err(|_| NetworkError::Offline)?;
-            entries
-                .keys()
-                .filter(|k| {
-                    &k.proxy_origin == proxy_origin
-                        && k.credential_id == credential_id
-                        && k.scope_epoch < new_epoch
-                })
-                .cloned()
-                .collect()
-        };
-
-        for key in matching_keys {
-            self.invalidate(&key, timeout)?;
-        }
-        Ok(())
+        self.invalidate_matching(
+            |k| {
+                &k.proxy_origin == proxy_origin
+                    && k.credential_id == credential_id
+                    && k.scope_epoch < new_epoch
+            },
+            timeout,
+        )
     }
 
     /// Invalidate all entries for a given proxy and credential where generation < new_generation.
+    ///
+    /// Same all-or-report semantics as
+    /// [`invalidate_scope_epoch`](Self::invalidate_scope_epoch): every
+    /// matching entry ends up inactive even when a drain times out.
     pub fn invalidate_generation(
         &self,
         proxy_origin: &CanonicalOrigin,
@@ -432,23 +416,50 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
         new_generation: u64,
         timeout: Duration,
     ) -> Result<(), NetworkError> {
-        let matching_keys: Vec<PoolKey> = {
-            let entries = self.entries.read().map_err(|_| NetworkError::Offline)?;
-            entries
-                .keys()
-                .filter(|k| {
-                    &k.proxy_origin == proxy_origin
-                        && k.credential_id == credential_id
-                        && k.generation < new_generation
-                })
-                .cloned()
-                .collect()
+        self.invalidate_matching(
+            |k| {
+                &k.proxy_origin == proxy_origin
+                    && k.credential_id == credential_id
+                    && k.generation < new_generation
+            },
+            timeout,
+        )
+    }
+
+    /// Remove every entry whose key satisfies `matches` and mark it inactive
+    /// under one exclusive guard, then wait up to `timeout` per entry for its
+    /// leases to drain.
+    ///
+    /// Removal and deactivation happen before any waiting, so no matching
+    /// entry stays reachable by checkout while another one drains. Every
+    /// entry is drained; the first drain failure is returned afterwards.
+    fn invalidate_matching<F>(&self, matches: F, timeout: Duration) -> Result<(), NetworkError>
+    where
+        F: Fn(&PoolKey) -> bool,
+    {
+        let removed: Vec<Arc<RegistryEntry<T>>> = {
+            let mut entries = self.entries.write().map_err(|_| NetworkError::Offline)?;
+            let keys: Vec<PoolKey> = entries.keys().filter(|k| matches(k)).cloned().collect();
+            let mut removed = Vec::with_capacity(keys.len());
+            for key in &keys {
+                if let Some(entry) = entries.remove(key) {
+                    entry.active.store(false, Ordering::SeqCst);
+                    removed.push(entry);
+                }
+            }
+            removed
         };
 
-        for key in matching_keys {
-            self.invalidate(&key, timeout)?;
+        let mut first_error = None;
+        for entry in &removed {
+            if let Err(error) = drain_leases(entry, timeout) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Count of active entries currently in the lookup table.
@@ -468,6 +479,22 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
             })
             .unwrap_or(0)
     }
+}
+
+/// Polling interval while waiting for an invalidated entry's leases to drain.
+const LEASE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Wait up to `timeout` for every lease on an already-inactive `entry` to be
+/// released, failing closed as [`NetworkError::Offline`] on timeout.
+fn drain_leases<T>(entry: &RegistryEntry<T>, timeout: Duration) -> Result<(), NetworkError> {
+    let start = Instant::now();
+    while entry.active_leases.load(Ordering::SeqCst) > 0 {
+        if start.elapsed() >= timeout {
+            return Err(NetworkError::Offline);
+        }
+        std::thread::sleep(LEASE_DRAIN_POLL_INTERVAL);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
