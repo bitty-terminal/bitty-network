@@ -15,6 +15,10 @@ bitty-network-dns        # DNS resolution & caching
 bitty-network-tls        # TLS provider
     ↑
 bitty-network            # HTTP/WebSocket backends
+    ↑
+bitty-net                # stdio coprocess component (wire protocol v1)
+
+bitty-network-wire       # wire protocol v1 codec (std only; linked by core)
 ```
 
 ### Crates
@@ -28,6 +32,12 @@ bitty-network            # HTTP/WebSocket backends
 - **`bitty-network-tls`** — TLS trust provider: CA bundles, platform verifier, client identity (mTLS), X.509 certificate parsing.
 
 - **`bitty-network`** — The real implementation (async runtime, transport, HTTP/WebSocket, proxy, policy) behind default-off Cargo features.
+
+- **`bitty-network-wire`** — Native-component wire protocol v1 codec: length-prefixed frames (256 KiB max), fixed message tags, bounded fail-closed decoding. Dependency-free; the only crate from this repository the Bitty core links (DIR-030). The byte layout is documented in the crate rustdoc.
+
+- **`bitty-net`** — The `net` native component executable (lib + bin). Spawned by the core on demand, it serves wire protocol v1 on stdin/stdout, re-checks the per-request grant (never widening it), and executes HTTP through `bitty-network` (`http` feature). `bitty-net --version` prints the version.
+
+- **`bitty-network-lua`** — Deprecated: the embedded Lua binding is retired by DIR-030; core uses the `bitty-net` component. Kept until its removal task lands.
 
 ## Status
 
@@ -67,7 +77,9 @@ bitty-network = { version = "0.1", features = ["http"] }
 
 ### Lua Integration
 
-Lua plugins access network capabilities through the capability system:
+Lua plugins reach the network through the Bitty core, which brokers requests
+to the `bitty-net` component (DIR-030); there is no embedded Lua binding. The
+Lua surface below is the planned shape:
 
 ```lua
 -- bitty-plugin.toml
@@ -96,7 +108,7 @@ See `docs/lua-integration/design.md` for the complete Lua API design.
 
 ## Layout
 
-- `crates/` — workspace members (bitty-network-api, bitty-network-core, bitty-network-dns, bitty-network-tls, bitty-network)
+- `crates/` — workspace members (bitty-network-api, bitty-network-core, bitty-network-dns, bitty-network-tls, bitty-network, bitty-network-wire, bitty-net, deprecated bitty-network-lua)
 - `docs/` — architecture and integration documentation
 
 ## Gates

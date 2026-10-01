@@ -1,0 +1,18 @@
+[package]
+name = "bitty-network-wire"
+description = "Bitty native-component wire protocol v1 codec (framing and messages; std only, no I/O policy)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "protocol", "codec", "bitty"]
+categories = ["network-programming", "encoding"]
+publish = true
+
+[lints]
+workspace = true
+
+# Deliberately dependency-free: the codec is linked by the Bitty core broker,
+# which must not pull any network implementation crate.
+[dependencies]

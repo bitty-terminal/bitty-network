@@ -75,6 +75,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "bitty-net"
+version = "0.1.0"
+dependencies = [
+ "bitty-network",
+ "bitty-network-api",
+ "bitty-network-wire",
+]
+
+[[package]]
 name = "bitty-network"
 version = "0.1.0"
 dependencies = [
@@ -134,6 +143,10 @@ dependencies = [
  "zerotrie",
  "zerovec",
 ]
+
+[[package]]
+name = "bitty-network-wire"
+version = "0.1.0"
 
 [[package]]
 name = "block-buffer"

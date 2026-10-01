@@ -2,6 +2,10 @@
 
 L1 Rust Core Extension: shared optional network runtime (`bitty-network-api` +
 `bitty-network`). Default-off; the `bitty` binary stays network-free.
+The `bitty-net` crate builds the `net` native component (stdio coprocess,
+DIR-030) and `bitty-network-wire` is its dependency-free protocol v1 codec,
+the only crate of this repository the core links. `bitty-network-lua` is
+deprecated (embedded binding retired by DIR-030).
 
 ## Rules
 
@@ -18,6 +22,11 @@ L1 Rust Core Extension: shared optional network runtime (`bitty-network-api` +
   implementation. The shell crates stay dependency-free by default.
 - `bitty-network-api` stays implementation-free: no HTTP/TLS/runtime
   dependencies, ever. Consumers depend on `-api` only.
+- `bitty-network-wire` stays dependency-free (`std` only, no serde); every
+  decode is bounded and fail-closed. Tag values and limits are fixed by
+  protocol v1; changing them is a protocol version bump.
+- `bitty-net` writes protocol frames only to stdout and diagnostics only to
+  stderr, never logging URLs, header values, or bodies.
 - Ephemeral scratch under `/tmp/bitty/`; durable material under repo-local
   gitignored `recording/`. Disk hygiene: remove task target dirs on close.
 - Implementation goes to scoped subagents with independent review; no

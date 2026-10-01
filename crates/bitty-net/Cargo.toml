@@ -1,0 +1,29 @@
+[package]
+name = "bitty-net"
+description = "Bitty native network component: stdio coprocess serving wire protocol v1 over bitty-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["network", "bitty", "component"]
+categories = ["network-programming", "command-line-utilities"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "bitty_net"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bitty-net"
+path = "src/main.rs"
+
+[dependencies]
+bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
+bitty-network-wire = { path = "../bitty-network-wire", version = "0.1.0" }
+# Real HTTP transport. The `proxy` feature stays off: the component reads no
+# proxy variable itself unless a build opts in explicitly.
+bitty-network = { path = "../bitty-network", version = "0.1.0", features = ["http"] }
