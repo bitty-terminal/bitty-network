@@ -10,6 +10,8 @@ docs = "bitty-terminal-docs"
 [contracts.provides]
 network-api = "crates/bitty-network-api" # light contract: Request/Response/Error/capability defs/service traits, zero impl deps
 network-impl = "crates/bitty-network" # optional runtime: transport/protocol/TLS/DNS/policy behind default-off features
+component-wire = "crates/bitty-network-wire" # native-component wire protocol v1 codec (std only), linked by the core broker
+component-net = "crates/bitty-net" # `net` native component executable `bitty-net` (DIR-030 stdio coprocess)
 
 [contracts.consumes]
 core-ontology = "bitty-docs: ADR-0013" # Panel/Execution identity terms reused in capability audit records

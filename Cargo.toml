@@ -6,6 +6,10 @@ members = [
     "crates/bitty-network-dns",
     "crates/bitty-network-tls",
     "crates/bitty-network",
+    "crates/bitty-network-wire",
+    "crates/bitty-net",
+    # Deprecated: embedded Lua binding retired by DIR-030 (core uses the
+    # bitty-net component); kept as a member until its removal task lands.
     "crates/bitty-network-lua",
 ]
 
@@ -34,7 +38,3 @@ yoke-derive = "=0.8.2"
 zerotrie = "=0.2.4"
 zerovec = "=0.11.6"
 potential_utf = "=0.1.5"
-
-# Lua FFI bindings (future integration)
-# Note: Commented out until mlua version is aligned with bitty/crates/bitty-lua
-# "crates/bitty-network-lua",
