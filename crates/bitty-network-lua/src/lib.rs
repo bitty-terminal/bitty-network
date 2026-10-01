@@ -1,5 +1,10 @@
 //! Phodopus FFI bindings for bitty-network with shared runtime.
 //!
+//! **Deprecated:** the embedded binding is retired by DIR-030; Bitty core
+//! uses the `bitty-net` native component over wire protocol v1
+//! (`bitty-network-wire`) instead. This crate is kept only until its removal
+//! task lands; do not add new consumers.
+//!
 //! This crate provides network capabilities to Lua plugins via Phodopus, Bitty's
 //! pure-Rust stackless Lua VM. Key features:
 //!

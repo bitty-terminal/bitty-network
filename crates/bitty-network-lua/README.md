@@ -1,5 +1,9 @@
 # bitty-network-lua
 
+> **Deprecated:** embedded binding retired by DIR-030; core uses the
+> `bitty-net` component (wire protocol v1, `bitty-network-wire`). Kept until
+> its removal task lands; do not add new consumers.
+
 Lua FFI bindings for bitty-network with shared runtime and dependency deduplication.
 
 ## Overview

@@ -9,12 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Feature** (#71, DIR-030): `bitty-network-wire` crate — native-component
+  wire protocol v1 codec (u32 big-endian length framing, 256 KiB frames,
+  fixed message tags, bounded fail-closed decoding; `std` only).
+- **Feature** (#71, DIR-030): `bitty-net` crate — the `net` native component
+  executable. Serves protocol v1 on stdin/stdout: handshake, grant-checked
+  HTTP requests on bounded worker threads (64 in flight), chunked request and
+  response bodies, cancel, and bounded shutdown on `Shutdown` or EOF.
+
 - **Feature**: Implemented Phodopus Callback integration in `bitty-network-lua`.
   Added `callback.rs` module with `create_echo_callback()` and `create_info_callback()`
   demonstrating how to create Lua callbacks using Phodopus API. The `echo` callback
   mirrors string input, and `info` returns a table with runtime metadata. Both callbacks
   are registered under `bitty.network` namespace. Includes comprehensive unit tests and
   integration tests validating callback invocation from Lua scripts.
+
+### Deprecated
+
+- `bitty-network-lua`: the embedded Lua binding is retired by DIR-030; the
+  core uses the `bitty-net` component instead.
 
 ### Changed
 
