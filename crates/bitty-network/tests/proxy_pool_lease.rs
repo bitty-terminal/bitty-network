@@ -403,3 +403,83 @@ fn service_scope_registry_tracks_and_invalidates_authenticated_egress() {
 
     proxy_probe.stop_and_join();
 }
+
+// -----------------------------------------------------------------------------
+// Test 7: bulk_invalidation_deactivates_every_matching_key_even_on_drain_timeout
+// -----------------------------------------------------------------------------
+
+/// Drain timeout for the bulk-invalidation tests: long enough to be a real
+/// wait, short enough that the held lease reliably outlives it.
+const BULK_DRAIN_TIMEOUT: Duration = Duration::from_millis(20);
+
+#[test]
+fn scope_epoch_invalidation_deactivates_every_matching_key_even_on_drain_timeout() {
+    let proxy = CanonicalOrigin::parse("http://proxy.test:8080").unwrap();
+    let dest_a = CanonicalOrigin::parse("https://a.test:443").unwrap();
+    let dest_b = CanonicalOrigin::parse("https://b.test:443").unwrap();
+    let key_held = PoolKey::new(proxy.clone(), dest_a, "cred-bulk-epoch", 1, 1);
+    let key_idle = PoolKey::new(proxy.clone(), dest_b, "cred-bulk-epoch", 1, 1);
+
+    let registry = ScopeRegistry::<String>::new();
+    let held_lease = registry
+        .register(key_held.clone(), "held".to_owned())
+        .unwrap();
+    drop(
+        registry
+            .register(key_idle.clone(), "idle".to_owned())
+            .unwrap(),
+    );
+
+    // One key cannot drain, so the bulk invalidation reports the timeout.
+    assert_eq!(
+        registry.invalidate_scope_epoch(&proxy, "cred-bulk-epoch", 2, BULK_DRAIN_TIMEOUT),
+        Err(NetworkError::Offline)
+    );
+
+    // Whatever order the keys were visited in, both are gone and inactive.
+    assert!(!held_lease.is_active());
+    assert_eq!(registry.active_entry_count(), 0);
+    assert!(matches!(
+        registry.checkout(&key_idle),
+        Err(NetworkError::Offline)
+    ));
+    assert!(matches!(
+        registry.checkout(&key_held),
+        Err(NetworkError::Offline)
+    ));
+    drop(held_lease);
+}
+
+/// Both keys hold a lease, so whichever key is visited first times out. The
+/// old early-return left the second one checkout-able on every run; this pins
+/// that deterministically rather than depending on `HashMap` order.
+#[test]
+fn generation_invalidation_deactivates_every_matching_key_even_on_drain_timeout() {
+    let proxy = CanonicalOrigin::parse("http://proxy.test:8080").unwrap();
+    let dest_a = CanonicalOrigin::parse("https://a.test:443").unwrap();
+    let dest_b = CanonicalOrigin::parse("https://b.test:443").unwrap();
+    let key_a = PoolKey::new(proxy.clone(), dest_a, "cred-bulk-gen", 1, 1);
+    let key_b = PoolKey::new(proxy.clone(), dest_b, "cred-bulk-gen", 1, 1);
+
+    let registry = ScopeRegistry::<String>::new();
+    let lease_a = registry.register(key_a.clone(), "a".to_owned()).unwrap();
+    let lease_b = registry.register(key_b.clone(), "b".to_owned()).unwrap();
+
+    assert_eq!(
+        registry.invalidate_generation(&proxy, "cred-bulk-gen", 2, BULK_DRAIN_TIMEOUT),
+        Err(NetworkError::Offline)
+    );
+
+    assert!(!lease_a.is_active());
+    assert!(!lease_b.is_active());
+    assert_eq!(registry.active_entry_count(), 0);
+    assert!(matches!(
+        registry.checkout(&key_a),
+        Err(NetworkError::Offline)
+    ));
+    assert!(matches!(
+        registry.checkout(&key_b),
+        Err(NetworkError::Offline)
+    ));
+    drop((lease_a, lease_b));
+}

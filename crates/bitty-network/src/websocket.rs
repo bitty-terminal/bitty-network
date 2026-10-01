@@ -73,7 +73,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use bitty_network_api::{NetworkError, WebSocketRequest};
+use bitty_network_api::{NetworkError, URL_AUTHORITY_DELIMITERS, WebSocketRequest};
 use bitty_network_core::CanonicalOrigin;
 use tungstenite::stream::MaybeTlsStream;
 
@@ -1018,7 +1018,7 @@ fn parse_target(url: &str) -> Result<WsTarget, NetworkError> {
         "wss" => true,
         _ => return Err(NetworkError::Offline),
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     let hostport = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
@@ -1032,7 +1032,7 @@ fn parse_authority(authority: &str, default_port: u16) -> Result<(String, u16), 
         || authority.contains('@')
         || authority
             .bytes()
-            .any(|byte| byte <= b' ' || byte >= 0x7f || b"/?#".contains(&byte))
+            .any(|byte| byte <= b' ' || byte >= 0x7f || b"/?#\\".contains(&byte))
     {
         return Err(NetworkError::Offline);
     }
@@ -1476,11 +1476,31 @@ mod tests {
             "ws://user@example.com/socket",
             "ws://example.com:8080/a?b#c",
             "WS://EXAMPLE.com/chat",
+            "ws://evil.com\\@allowed.com/socket",
+            "wss://evil.com\\:9000@allowed.com/",
         ] {
             let request = WebSocketRequest::new(url);
             let target = parse_target(url).expect("parseable");
             assert_eq!(target.host, request.host().to_lowercase());
         }
+    }
+
+    /// `\` ends the authority (WHATWG treats it as `/` for `ws`/`wss`), so the
+    /// dial target of `ws://evil.com\@allowed.com/` is `evil.com`, and a
+    /// capability for `allowed.com` denies it before any socket is opened.
+    #[test]
+    fn backslash_userinfo_smuggling_dials_and_checks_the_same_host() {
+        let url = "ws://evil.com\\@allowed.com/socket";
+        let target = parse_target(url).expect("parseable");
+        assert_eq!(target.host, "evil.com");
+        assert_eq!(target.port, 80);
+        let capability = bitty_network_api::NetworkCapability::offline().with_domain("allowed.com");
+        assert_eq!(
+            capability.check_handshake(&WebSocketRequest::new(url)),
+            Err(NetworkError::Denied {
+                domain: "evil.com".to_owned()
+            })
+        );
     }
 
     #[test]

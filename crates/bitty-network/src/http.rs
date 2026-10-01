@@ -120,7 +120,7 @@ use std::time::{Duration, Instant};
 
 use bitty_network_api::{
     HttpMethod, NetworkCapability, NetworkError, NetworkService, Request, Response,
-    WebSocketRequest,
+    URL_AUTHORITY_DELIMITERS, WebSocketRequest,
 };
 use bitty_network_core::CanonicalOrigin;
 use reqwest::header::{HeaderName, HeaderValue};
@@ -1019,7 +1019,7 @@ fn resolve_redirect(hop_url: &str, location: &str) -> String {
     let Some((scheme, rest)) = hop_url.split_once("://") else {
         return location.to_owned();
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     if location.starts_with('/') {
         return format!("{scheme}://{authority}{location}");
     }
@@ -1029,8 +1029,11 @@ fn resolve_redirect(hop_url: &str, location: &str) -> String {
     }
     let directory = match base.split_once("://") {
         Some((_, after)) => {
-            let path = after.find('/').map(|index| &after[index..]).unwrap_or("/");
-            match path.rfind('/') {
+            let path = after
+                .find(['/', '\\'])
+                .map(|index| &after[index..])
+                .unwrap_or("/");
+            match path.rfind(['/', '\\']) {
                 Some(0) | None => format!("{scheme}://{authority}/"),
                 Some(cut) => {
                     let dir = &path[..cut + 1];
@@ -1652,6 +1655,22 @@ mod tests {
         assert_eq!(
             resolve_redirect("http://127.0.0.1:1/a/b?x=1#y", "?x=2"),
             "http://127.0.0.1:1/a/b?x=2"
+        );
+    }
+
+    #[test]
+    fn resolve_redirect_treats_backslash_as_path_separator() {
+        // `URL_AUTHORITY_DELIMITERS` already treats `\` as ending the
+        // authority (closing the smuggling gap); the directory split here
+        // must agree, finding and preserving a backslash path segment
+        // rather than skipping past it to the next literal `/`, or a
+        // relative redirect loses the hop's directory. The real HTTP URL
+        // parser treats `\` as `/` for these schemes, so
+        // `http://example.com\dir/final` resolves to the same place as
+        // `http://example.com/dir/final`.
+        assert_eq!(
+            resolve_redirect("http://example.com\\dir/start", "final"),
+            "http://example.com\\dir/final"
         );
     }
 

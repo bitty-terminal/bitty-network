@@ -245,6 +245,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the X.509 `keyUsage` length guard is likewise recorded as provably redundant
   with the DER padding check rather than as pinned coverage.
 
+### Fixed
+
+- Close a proxy-authority smuggling gap: `\` now ends the URL authority
+  everywhere the authority is split — capability checks (`url_host`,
+  `url_port`, `redact_url`), `CanonicalOrigin`, `redacted_url`, the WebSocket
+  target and authority parsers, and `resolve_redirect` — through one shared
+  `URL_AUTHORITY_DELIMITERS` constant. WHATWG parsing (and so `reqwest`/`url`)
+  treats `\` as `/` for the special schemes this crate handles, so
+  `https://evil.com\@allowed.com/` is dialed as `evil.com`; it is now also
+  checked, canonicalized, and redacted as `evil.com` instead of passing a grant
+  for `allowed.com` (`#25`).
+- `ScopeRegistry` bulk invalidation now removes and deactivates every matching
+  entry — scope-epoch and generation — under a single write lock, drains each
+  lease, and returns the first drain error instead of stopping at it and leaving
+  the remaining stale keys checkout-able (`#25`).
+- Admit standard RSA trust anchors and RSASSA-PSS signatures in the X.509 root
+  reader. `AlgorithmIdentifier` parameters now carry their tag, so a DER `NULL`
+  (`05 00`, empty contents) is recognized: `rsaEncryption` keys and
+  `sha256/384/512WithRSAEncryption` signatures are admitted with `NULL` or
+  absent parameters (every standard RSA root was refused before), while
+  parameters on ECDSA/Ed25519 and a PSS with no `RSASSA-PSS-params` SEQUENCE are
+  refused. `pss_hash_admitted` follows RFC 4055 — `hashAlgorithm` is the `[0]`
+  EXPLICIT `AlgorithmIdentifier`, and only SHA-256/384/512 with `NULL` or absent
+  parameters are admitted — so the SHA-1 default stays refused (`#21`, `#14`).
+- `read_time` refuses non-ASCII contents before slicing, removing a panic on
+  multibyte UTF-8 in a `UTCTime`/`GeneralizedTime` field (`#21`, `#14`).
+
 ### Security
 
 - The DNS cache is a new place where a resolved address is reused, so its

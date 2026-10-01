@@ -1073,6 +1073,16 @@ pub trait NetworkService {
     fn websocket(&self, request: &WebSocketRequest) -> Result<Self::Socket, NetworkError>;
 }
 
+/// Characters that end the authority component of a URL.
+///
+/// WHATWG URL parsing (and therefore `reqwest`/`url`) treats `\` exactly like
+/// `/` for the special schemes this crate handles (`http`, `https`, `ws`,
+/// `wss`). Every authority split must end at the same characters the dialing
+/// client does, or `https://evil.com\@allowed.com/` would be checked as
+/// `allowed.com` and dialed as `evil.com`. Shared so every copy of the split
+/// (capability checks, dial targets, canonical origins, redaction) agrees.
+pub const URL_AUTHORITY_DELIMITERS: [char; 4] = ['/', '?', '#', '\\'];
+
 /// Lowercase and trim one trailing dot (`example.com.`); keep matching exact.
 fn normalize_domain(domain: impl AsRef<str>) -> String {
     domain.as_ref().trim().trim_end_matches('.').to_lowercase()
@@ -1084,7 +1094,7 @@ fn normalize_domain(domain: impl AsRef<str>) -> String {
 /// IPv6 brackets are honored; userinfo is stripped before the split.
 fn url_port(url: &str) -> Option<u16> {
     let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     let hostport = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
@@ -1115,7 +1125,10 @@ fn url_host(url: &str) -> &str {
         Some((_, rest)) => rest,
         None => url,
     };
-    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = after_scheme
+        .split(URL_AUTHORITY_DELIMITERS)
+        .next()
+        .unwrap_or("");
     let hostport = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
@@ -1153,7 +1166,9 @@ fn redact_url(url: &str) -> String {
         Some((scheme, rest)) => (scheme, rest),
         None => return "[redacted-url]".to_owned(),
     };
-    let (authority, path) = match rest.find('/') {
+    // The authority ends where the capability check's does, so the redacted
+    // host is the host that was checked and dialed.
+    let (authority, path) = match rest.find(URL_AUTHORITY_DELIMITERS) {
         Some(index) => rest.split_at(index),
         None => (rest, ""),
     };
@@ -1531,6 +1546,47 @@ mod tests {
             NetworkCapability::offline().check_request(&Request::get("https://example.com/")),
             Err(NetworkError::Offline)
         );
+    }
+
+    /// WHATWG parsers (and so `reqwest`) end the authority at `\` for special
+    /// schemes, so `https://evil.com\@allowed.com/` dials `evil.com`. The
+    /// capability check must read the same host, or a grant for `allowed.com`
+    /// would authorize a connection to `evil.com`.
+    #[test]
+    fn backslash_ends_the_authority_like_the_dialing_client() {
+        let capped = NetworkCapability::offline().with_domain("allowed.com");
+        let smuggled = Request::get("https://evil.com\\@allowed.com/");
+        assert_eq!(smuggled.host(), "evil.com");
+        assert_eq!(smuggled.port(), Some(443));
+        assert_eq!(
+            capped.check_request(&smuggled),
+            Err(NetworkError::Denied {
+                domain: "evil.com".to_owned()
+            })
+        );
+        // A backslash also ends the authority before a port-looking tail.
+        assert_eq!(
+            Request::get("http://evil.com\\:8080@allowed.com/").port(),
+            Some(80)
+        );
+
+        let smuggled_ws = WebSocketRequest::new("wss://evil.com\\@allowed.com/socket");
+        assert_eq!(smuggled_ws.host(), "evil.com");
+        assert_eq!(
+            capped.check_handshake(&smuggled_ws),
+            Err(NetworkError::Denied {
+                domain: "evil.com".to_owned()
+            })
+        );
+
+        // The genuine host is still admitted, so the denial is not vacuous.
+        assert_eq!(
+            capped.check_request(&Request::get("https://allowed.com\\path")),
+            Ok(())
+        );
+        // Redaction reports the checked host as the authority, not the tail
+        // that only looks like one.
+        assert!(redact_url("https://evil.com\\@allowed.com/").starts_with("https://evil.com\\"));
     }
 
     #[test]
