@@ -62,22 +62,22 @@ websocket = ["http"]   # WebSocket + HTTP handshake
 
 ```toml
 [dependencies]
-bitty-network-api = "0.1"
+bitty-network-api = "0.0.1"
 ```
 
 ### DNS resolution only
 
 ```toml
 [dependencies]
-bitty-network-api = "0.1"
-bitty-network-dns = "0.1"
+bitty-network-api = "0.0.1"
+bitty-network-dns = "0.0.1"
 ```
 
 ### Full HTTP client
 
 ```toml
 [dependencies]
-bitty-network = { version = "0.1", features = ["http"] }
+bitty-network = { version = "0.0.1", features = ["http"] }
 ```
 
 ### Lua Integration
