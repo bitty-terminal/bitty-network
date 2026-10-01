@@ -427,12 +427,15 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
     }
 
     /// Remove every entry whose key satisfies `matches` and mark it inactive
-    /// under one exclusive guard, then wait up to `timeout` per entry for its
-    /// leases to drain.
+    /// under one exclusive guard, then wait up to `timeout` in total across
+    /// every removed entry for its leases to drain.
     ///
     /// Removal and deactivation happen before any waiting, so no matching
     /// entry stays reachable by checkout while another one drains. Every
-    /// entry is drained; the first drain failure is returned afterwards.
+    /// entry is attempted — a timed-out drain on one entry does not skip the
+    /// rest — but all drains share one deadline, so a bulk invalidation of N
+    /// entries bounds total blocking by `timeout`, not `timeout` per entry.
+    /// The first drain failure is returned afterwards.
     fn invalidate_matching<F>(&self, matches: F, timeout: Duration) -> Result<(), NetworkError>
     where
         F: Fn(&PoolKey) -> bool,
@@ -450,9 +453,11 @@ impl<T: Clone + Send + Sync + 'static> ScopeRegistry<T> {
             removed
         };
 
+        let deadline = Instant::now() + timeout;
         let mut first_error = None;
         for entry in &removed {
-            if let Err(error) = drain_leases(entry, timeout) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if let Err(error) = drain_leases(entry, remaining) {
                 first_error.get_or_insert(error);
             }
         }
