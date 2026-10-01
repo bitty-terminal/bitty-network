@@ -14,5 +14,5 @@ publish = false
 workspace = true
 
 [dependencies]
-bitty-network-api = { path = "../bitty-network-api", version = "0.1.0" }
+bitty-network-api = { path = "../bitty-network-api", version = "0.0.1" }
 idna = "=1.1.0"

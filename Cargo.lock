@@ -76,7 +76,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "bitty-net"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bitty-network",
  "bitty-network-api",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "bitty-network"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bitty-network-api",
  "bitty-network-core",
@@ -101,11 +101,11 @@ dependencies = [
 
 [[package]]
 name = "bitty-network-api"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "bitty-network-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bitty-network-api",
  "idna",
@@ -113,11 +113,11 @@ dependencies = [
 
 [[package]]
 name = "bitty-network-dns"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "bitty-network-lua"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bitty-network",
  "bitty-network-api",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "bitty-network-tls"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bitty-network-api",
  "idna",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "bitty-network-wire"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "block-buffer"
