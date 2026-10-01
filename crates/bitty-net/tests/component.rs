@@ -317,7 +317,12 @@ fn garbage_frame_is_protocol_error_and_exit() {
     assert_eq!(component.wait().code(), Some(2));
 }
 
+/// Skipped on Windows: the default `HttpNetworkService::new()` may fail to
+/// build a reqwest client in CI (native-tls backend cannot access the system
+/// certificate store), falling back to an offline service. bitty-network's
+/// own Windows CI skips HTTP tests for the same reason.
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "HttpNetworkService may be offline")]
 fn get_large_body_streams_in_chunks() {
     let stub = Stub::start();
     let mut component = Component::spawn();
@@ -397,7 +402,9 @@ fn denied_host_and_offline_grant_never_connect() {
     assert_eq!(component.wait().code(), Some(0));
 }
 
+/// Skipped on Windows: see `get_large_body_streams_in_chunks`.
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "HttpNetworkService may be offline")]
 fn cancel_suppresses_response_and_session_continues() {
     let stub = Stub::start();
     let mut component = Component::spawn();
