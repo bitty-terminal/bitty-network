@@ -827,7 +827,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "phodopus"
 version = "0.2.0-alpha.1"
-source = "git+https://github.com/bitty-terminal/phodopus?rev=1653c51f7fbda5e93fa99aefb0e5be58dfacfeb0#1653c51f7fbda5e93fa99aefb0e5be58dfacfeb0"
+source = "git+https://github.com/bitty-terminal/phodopus?rev=f6aa59a#f6aa59a16c0dd8d3f65f54043f8c3c2fe02b5344"
 dependencies = [
  "ahash",
  "allocator-api2",
