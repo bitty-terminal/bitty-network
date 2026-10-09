@@ -49,6 +49,8 @@ rustls = { version = "=0.23.45", default-features = false, features = ["std"], o
 # and private key at runtime and keep them outside the repository, so no
 # certificate or key fixture is ever committed. `default-features = false`
 # with `aws_lc_rs` avoids pulling a second crypto provider into the test build.
+# Pinned to 0.13.x: rcgen 0.14+ requires rustc 1.88 and reworks the signing API
+# around Issuer, above this repo's MSRV 1.85. Revisit on MSRV rise.
 rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustls-pki-types = "1.15.1"
 # `OffsetDateTime` is the type of a generated certificate's validity window.

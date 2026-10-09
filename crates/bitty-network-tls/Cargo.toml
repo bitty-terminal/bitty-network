@@ -19,7 +19,7 @@ bitty-network-api = { path = "../bitty-network-api", version = "0.0.1" }
 # native roots, PKI types for certificates/keys/PEM, IDNA for canonical-host
 # normalization, and zeroize for key buffers. Exact pins match bitty-network.
 rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs"] }
-rustls-platform-verifier = { version = "=0.7.0", default-features = false }
+rustls-platform-verifier = { version = "=0.7.1", default-features = false }
 rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
 idna = { version = "=1.1.0" }
 zeroize = { version = "=1.9.0", features = ["alloc"] }
@@ -38,6 +38,8 @@ potential_utf = { workspace = true }
 # runtime and keep them outside the repository, so no certificate or key
 # fixture is ever committed. `default-features = false` with `aws_lc_rs`
 # avoids pulling a second crypto provider into the test build.
+# Pinned to 0.13.x: rcgen 0.14+ requires rustc 1.88 and reworks the signing API
+# around Issuer, above this repo's MSRV 1.85. Revisit on MSRV rise.
 rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
 # `OffsetDateTime` is the type of a generated certificate's validity window.
 # Already in the graph through rcgen; a dev-dependency so the test-only
