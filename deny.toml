@@ -89,6 +89,10 @@ wildcards = "deny"
 # - r-efi 5.3.0 (via phodopus getrandom 0.3.x) alongside 6.0.0 (via reqwest getrandom 0.4.x).
 #   Phodopus pins rand 0.9.x ecosystem; websocket/http use rand 0.10.x ecosystem.
 #   Will unify when Phodopus updates or when published to crates.io.
+#
+# Duplicate versions from the icu patch updates (dependabot #84):
+# - synstructure 0.13.2 (via phodopus gc-arena-derive) alongside 0.14.0
+#   (via yoke-derive 0.8.4). Unifying is gc-arena upstream's release to make.
 skip = [
     { crate = "base64@0.22.1", reason = "reqwest-tree dupe, upstream unification pending" },
     { crate = "syn@2.0.119", reason = "reqwest-tree dupe, upstream unification pending" },
@@ -96,6 +100,7 @@ skip = [
     { crate = "rand@0.9.5", reason = "phodopus git dep uses rand 0.9.x, will unify on phodopus publish" },
     { crate = "getrandom@0.3.4", reason = "phodopus git dep uses getrandom 0.3.x, will unify on phodopus publish" },
     { crate = "r-efi@5.3.0", reason = "phodopus git dep uses r-efi 5.x, will unify on phodopus publish" },
+    { crate = "synstructure@0.13.2", reason = "phodopus gc-arena pins 0.13.x, yoke-derive 0.8.4 uses 0.14.x; unify on gc-arena release" },
 ]
 
 [sources]
