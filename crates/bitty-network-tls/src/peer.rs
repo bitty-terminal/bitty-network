@@ -206,9 +206,14 @@ fn format_authority(host: &str, port: u16) -> String {
     }
 }
 
-/// Absolute instant `duration` after `start`.
+/// Absolute instant `duration` after `start`, never panicking: an
+/// unrepresentable sum clamps to a far-future instant, and a still-failing
+/// fallback expires immediately (fail-closed) instead of hanging.
 fn deadline_from(start: Instant, duration: Duration) -> Instant {
-    start + duration
+    start
+        .checked_add(duration)
+        .or_else(|| start.checked_add(Duration::from_secs(u64::from(u32::MAX))))
+        .unwrap_or(start)
 }
 
 /// Remaining fetch budget: the deadline minus elapsed, never below
@@ -380,6 +385,17 @@ mod tests {
     fn remaining_never_returns_zero() {
         let floor = remaining(Duration::from_nanos(1), Instant::now());
         assert!(floor >= MIN_REMAINING);
+    }
+
+    /// A very large timeout never panics: the deadline clamps instead of
+    /// overflowing `Instant` addition (CodeRabbit Minor on PR #89).
+    #[test]
+    fn huge_timeout_never_panics_the_deadline() {
+        let start = Instant::now();
+        let far = deadline_from(start, Duration::MAX);
+        assert!(far >= start);
+        let floored = remaining(Duration::MAX, start);
+        assert!(floored >= MIN_REMAINING);
     }
 
     /// Manual-only live handshake: one real TLS handshake against a loopback
