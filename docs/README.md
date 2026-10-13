@@ -25,6 +25,10 @@
 
 - [25: Proxy Auth Transition Plan](plans/25-proxy-auth-transition-plan.md) - Concrete transition plan for the 14 criteria of #25
 
+## Release
+
+- [crates.io publish runbook](crates-io-publish.md) - Ordered first publish of the registry-ready crates (`bitty-network-api`, `bitty-network-wire`)
+
 ## API Documentation
 
 Run `cargo doc --workspace --no-deps --open` to view the full API documentation.
