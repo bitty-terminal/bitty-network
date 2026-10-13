@@ -30,6 +30,9 @@ approval to flip those flags.
 - The registry token rotation recorded upstream is complete. Never publish
   with a token that may have been exposed; each publish is permanent
   (yank is the only undo).
+- Immediately before publishing, re-check that both crate names are still
+  free on the crates.io API. Names are first-come-first-served; the readiness
+  check above is point-in-time and the publish may run days after this note.
 - The working tree is clean and on `main`; the crates to publish are
   unchanged since the dry-run verification above.
 
@@ -46,6 +49,11 @@ cargo publish -p bitty-network-wire
 
 ## Verification
 
-- `cargo search bitty-network-wire --limit 1` shows each version after its step.
+- After each step, confirm the just-published crate is visible in the index
+  (`cargo search <crate> --limit 1` for `bitty-network-api` and
+  `bitty-network-wire` respectively).
+- From a clean consumer project outside this workspace, declare
+  `bitty-network-api = "=0.0.1"` and `bitty-network-wire = "=0.0.1"` under
+  `[dependencies]`, then run `cargo check`.
 - Every crate page on crates.io shows "Builds on docs.rs" once the docs
   build finishes.
