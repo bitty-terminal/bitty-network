@@ -287,7 +287,20 @@ impl<'a> Der<'a> {
     /// long-form length, a long form wider than the value can allow, and
     /// high-tag-number form.
     fn next(&mut self) -> Option<(u8, &'a [u8])> {
-        let (tag, after_tag) = self.input.split_first()?;
+        let (tag, contents, _) = self.next_raw()?;
+        Some((tag, contents))
+    }
+
+    /// Read one tag-length-value triple, advancing past it, and also return
+    /// the triple's exact raw bytes (tag, length, and contents together).
+    ///
+    /// The raw slice is a subslice of the reader's input, so it is byte-exact
+    /// by construction: no re-encoding step exists that could normalize it.
+    /// [`Der::next`] is this without the third element; the parse is shared,
+    /// so the two can never disagree about where an element ends.
+    fn next_raw(&mut self) -> Option<(u8, &'a [u8], &'a [u8])> {
+        let start = self.input;
+        let (tag, after_tag) = start.split_first()?;
         // High-tag-number form (low five tag bits all set) encodes a tag number
         // of 31 or more. No field this module reads uses it, so refusing it
         // keeps the reader from decoding a tag it would never match.
@@ -298,9 +311,11 @@ impl<'a> Der<'a> {
         if length > after_length.len() {
             return None;
         }
+        let header_len = start.len() - after_length.len();
         let (contents, rest) = after_length.split_at(length);
         self.input = rest;
-        Some((*tag, contents))
+        let raw = &start[..header_len + length];
+        Some((*tag, contents, raw))
     }
 
     /// Read one triple, require `tag`, and return a reader over its contents.
@@ -760,6 +775,78 @@ fn skip_name(reader: &mut Der<'_>) -> Result<(), RootRejection> {
 /// subjectPublicKey BIT STRING }`, read far enough to admit or refuse the key.
 fn read_public_key(tbs: &mut Der<'_>) -> Result<(), RootRejection> {
     let mut spki = tbs.expect_value(TAG_SEQUENCE)?;
+    admit_spki_body(&mut spki)?;
+    if !spki.is_empty() {
+        return Err(RootRejection::Malformed);
+    }
+    Ok(())
+}
+
+/// Largest peer certificate this module will slice a `SubjectPublicKeyInfo`
+/// out of, in bytes.
+///
+/// A peer leaf is kilobytes; the bound stops a hostile or corrupt peer from
+/// making the slicer walk an unbounded buffer, and it is a policy value rather
+/// than an intrinsic one. Certificates above it are refused fail-closed with
+/// [`RootRejection::Malformed`], never truncated.
+pub const MAX_PEER_CERT_DER_BYTES: usize = 64 * 1024;
+
+/// Slice the leaf `SubjectPublicKeyInfo` DER out of one certificate.
+///
+/// Returns the exact DER bytes of the `subjectPublicKeyInfo` SEQUENCE
+/// (tag, length, and contents together), suitable for hashing by an SPKI-pin
+/// consumer. Hashing itself stays consumer-side: this function slices bytes,
+/// it never hashes.
+///
+/// The walk to the field mirrors [`admit_root`]'s structural checks up to the
+/// public key, and the sliced value then passes the same admission check
+/// [`read_public_key`] applies, so the two functions can never disagree about
+/// whether a certificate carries a usable key. Anything after the public key
+/// (extensions and the outer signature) is not walked: it cannot change the
+/// sliced bytes. Empty, oversized, truncated, or otherwise malformed input is
+/// [`RootRejection::Malformed`]; an unsupported or weak key is refused with
+/// the same reason [`read_public_key`] would give.
+pub fn leaf_spki_der(cert_der: &[u8]) -> Result<Vec<u8>, RootRejection> {
+    if cert_der.is_empty() || cert_der.len() > MAX_PEER_CERT_DER_BYTES {
+        return Err(RootRejection::Malformed);
+    }
+    let mut certificate = Der::read(cert_der);
+    let mut body = certificate.expect_value(TAG_SEQUENCE)?;
+    if !certificate.is_empty() {
+        return Err(RootRejection::Malformed);
+    }
+    let mut tbs = body.expect_value(TAG_SEQUENCE)?;
+    // version [0] EXPLICIT Version DEFAULT v1, same required-presence walk as
+    // `admit_root` so the two agree on structure.
+    if let Some((tag, _)) = tbs.next() {
+        if tag != TAG_CONTEXT_0 {
+            return Err(RootRejection::Malformed);
+        }
+    }
+    tbs.skip()?; // serialNumber INTEGER
+    tbs.skip()?; // signature AlgorithmIdentifier
+    skip_name(&mut tbs)?; // issuer Name
+    tbs.skip()?; // validity SEQUENCE
+    skip_name(&mut tbs)?; // subject Name
+    let (tag, contents, raw) = tbs.next_raw().ok_or(RootRejection::Malformed)?;
+    if tag != TAG_SEQUENCE {
+        return Err(RootRejection::Malformed);
+    }
+    let mut spki = Der::read(contents);
+    admit_spki_body(&mut spki)?;
+    if !spki.is_empty() {
+        return Err(RootRejection::Malformed);
+    }
+    Ok(raw.to_vec())
+}
+
+/// Admit or refuse one `SubjectPublicKeyInfo` body: the algorithm and key-size
+/// policy shared by [`read_public_key`] and [`leaf_spki_der`].
+///
+/// Takes a reader over the SEQUENCE contents (not the triple itself); the
+/// caller owns the tag check and the trailing-emptiness check, so both
+/// callers state those the same way.
+fn admit_spki_body(spki: &mut Der<'_>) -> Result<(), RootRejection> {
     let mut algorithm = spki.expect_value(TAG_SEQUENCE)?;
     let oid = read_oid(&mut algorithm)?;
     let parameters = algorithm.next();
@@ -1411,6 +1498,97 @@ mod tests {
                 let mut corrupted = certificate.clone();
                 corrupted[index] ^= 1 << bit;
                 let _ = admit_root(&corrupted);
+            }
+        }
+    }
+
+    /// A self-signed leaf certificate in DER, minted in memory: the slicer's
+    /// shape fixture. Generated at runtime like every other certificate in
+    /// these tests, so no certificate fixture is committed.
+    fn leaf_der() -> Vec<u8> {
+        ca_der(IsCa::NoCa, Vec::new())
+    }
+
+    /// The slicer returns the leaf's `SubjectPublicKeyInfo` as exactly one
+    /// DER element occurring byte-verbatim in the certificate.
+    ///
+    /// The pin consumer hashes these bytes, so "almost the right bytes" is
+    /// the failure mode: the slice must be one well-formed SEQUENCE and a
+    /// verbatim subsequence of the input, never a re-encoding.
+    #[test]
+    fn leaf_spki_slices_the_exact_subsequence() {
+        let certificate = leaf_der();
+        let spki = leaf_spki_der(&certificate).expect("a real leaf slices");
+        let mut reader = Der::read(&spki);
+        let (tag, contents) = reader.next().expect("the slice parses");
+        assert_eq!(tag, TAG_SEQUENCE);
+        assert!(
+            reader.is_empty(),
+            "the slice is exactly one element, never a prefix of one"
+        );
+        assert!(!contents.is_empty());
+        assert!(
+            certificate
+                .windows(spki.len())
+                .any(|window| window == spki.as_slice()),
+            "the slice occurs byte-verbatim in the certificate"
+        );
+    }
+
+    /// Empty, oversized, and malformed input is refused with a typed reason.
+    ///
+    /// Oversized refuses before parsing (one byte over the bound), and a full
+    /// bound of zeros is still malformed rather than accepted: the bound is a
+    /// ceiling, never a shape.
+    #[test]
+    fn leaf_spki_rejects_empty_oversized_and_malformed() {
+        assert_eq!(leaf_spki_der(&[]), Err(RootRejection::Malformed));
+        assert_eq!(
+            leaf_spki_der(b"not a certificate"),
+            Err(RootRejection::Malformed)
+        );
+        assert_eq!(
+            leaf_spki_der(&vec![0x30u8; MAX_PEER_CERT_DER_BYTES + 1]),
+            Err(RootRejection::Malformed)
+        );
+        assert_eq!(
+            leaf_spki_der(&vec![0u8; MAX_PEER_CERT_DER_BYTES]),
+            Err(RootRejection::Malformed)
+        );
+        let mut wrong_tag = leaf_der();
+        wrong_tag[0] = TAG_SET;
+        assert_eq!(leaf_spki_der(&wrong_tag), Err(RootRejection::Malformed));
+    }
+
+    /// Every prefix of a real leaf certificate is refused, and none panics.
+    ///
+    /// The slicer stops after the public key, so unlike admission this is not
+    /// "prefixes are never whole"; it holds for a stricter reason: the outer
+    /// certificate length always overruns a truncated input, so no prefix can
+    /// parse as a certificate at all.
+    #[test]
+    fn no_truncation_of_a_leaf_is_sliced() {
+        let certificate = leaf_der();
+        let cert_len = certificate.len();
+        for cut in 0..cert_len {
+            assert!(
+                leaf_spki_der(&certificate[..cut]).is_err(),
+                "a truncated leaf prefix must be refused"
+            );
+        }
+        assert!(leaf_spki_der(&certificate).is_ok());
+    }
+
+    /// Flipping any single bit of a real leaf either leaves the same SPKI
+    /// sliced or turns it into a typed refusal; it never panics.
+    #[test]
+    fn no_single_bit_corruption_of_a_leaf_panics() {
+        let certificate = leaf_der();
+        for index in 0..certificate.len() {
+            for bit in 0..8u8 {
+                let mut corrupted = certificate.clone();
+                corrupted[index] ^= 1 << bit;
+                let _ = leaf_spki_der(&corrupted);
             }
         }
     }
