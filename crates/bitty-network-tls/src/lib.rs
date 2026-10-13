@@ -108,6 +108,8 @@
 
 #![forbid(unsafe_code)]
 
+mod peer;
+pub use peer::{peer_leaf_spki_der, DEFAULT_PEER_TIMEOUT};
 mod provider;
 pub use provider::{canonical_host, TlsProvider, TlsSelection, TlsTransport};
 

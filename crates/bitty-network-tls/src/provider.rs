@@ -267,6 +267,28 @@ impl TlsProvider {
         configs.get(slot).map(Arc::clone)
     }
 
+    /// The client configuration for fetching one peer's leaf `SubjectPublicKeyInfo`.
+    ///
+    /// This is the configuration [`TlsProvider::select`] resolves for `host`
+    /// on the HTTP transport (so trust and client-identity selection match a
+    /// real handshake, including the custom-root validity re-check), except
+    /// when the policy is the default: a default policy selects no
+    /// configuration so that backends keep their own native-root construction,
+    /// but a peer fetch builds its own handshake and therefore needs one. The
+    /// fallback composes the platform store with no custom root and no client
+    /// identity, which is exactly what the backends' own default construction
+    /// is. ALPN offers `http/1.1` in both cases; the fetch sends no HTTP bytes
+    /// after the handshake regardless.
+    pub(crate) fn peer_client_config(&self, host: &str) -> Result<Arc<ClientConfig>, TlsFailure> {
+        if let Some(config) = self.select(TlsTransport::Http, host)?.config() {
+            return Ok(config);
+        }
+        let verifier = build_verifier(Vec::new())?;
+        let mut config = base_config(verifier)?.with_no_client_auth();
+        config.alpn_protocols = alpn_for(TlsTransport::Http);
+        Ok(Arc::new(config))
+    }
+
     /// One plus the number of identity slots: the size of a per-slot client set.
     #[must_use]
     pub fn identity_slot_count(&self) -> usize {
