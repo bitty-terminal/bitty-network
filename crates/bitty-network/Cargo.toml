@@ -41,7 +41,7 @@ tungstenite = { version = "=0.30.0", default-features = false, features = ["hand
 # The TLS provider (bitty-network-tls) composes the configuration; the HTTP
 # backend passes it to reqwest. This is the same rustls already in the graph
 # through reqwest and bitty-network-tls.
-rustls = { version = "=0.23.45", default-features = false, features = ["std"], optional = true }
+rustls = { version = "=0.23.46", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 # Test-only runtime CA and key generation (CTX-0021, issue #21). Dev-only, so

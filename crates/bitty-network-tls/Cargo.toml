@@ -18,7 +18,7 @@ bitty-network-api = { path = "../bitty-network-api", version = "0.0.1" }
 # TLS provider dependencies: rustls client configuration, platform verifier for
 # native roots, PKI types for certificates/keys/PEM, IDNA for canonical-host
 # normalization, and zeroize for key buffers. Exact pins match bitty-network.
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws-lc-rs"] }
 rustls-platform-verifier = { version = "=0.7.1", default-features = false }
 rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
 idna = { version = "=1.1.0" }
