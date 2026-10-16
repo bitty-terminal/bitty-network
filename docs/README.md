@@ -33,6 +33,10 @@
 
 Run `cargo doc --workspace --no-deps --open` to view the full API documentation.
 
+## Release
+
+- [Native component distribution](component-distribution.md) - `net` package shape, per-target digests, and tag-gated R2 publication
+
 ## Quick Links
 
 - Main crate: `bitty-network`
