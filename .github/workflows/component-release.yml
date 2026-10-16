@@ -1,0 +1,88 @@
+name: Publish net component
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: component-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package net component
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Resolve Rust channel
+        id: rust-channel
+        run: |
+          channel="$(scripts/rust-channel.sh)"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ steps.rust-channel.outputs.channel }}
+          components: rustfmt, clippy
+      - name: Verify tag version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          descriptor_version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
+          test "$version" = "$descriptor_version"
+      - name: Run Rust quality gates
+        run: just check
+      - name: Build and package Linux x86_64
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cargo build --release --locked -p bitty-net --target x86_64-unknown-linux-gnu
+          mkdir -p dist
+          scripts/package-component.sh \
+            --version "$version" \
+            --target x86_64-unknown-linux-gnu \
+            --binary target/x86_64-unknown-linux-gnu/release/bitty-net \
+            --output dist/x86_64-unknown-linux-gnu.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: net-component-package
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish net component to R2
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PREFIX: extensions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: net-component-package
+          path: dist
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install Wrangler
+        run: bun add --global wrangler@4.135.0
+      - name: Publish immutable package
+        env:
+          GITHUB_REF_TYPE: tag
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: scripts/publish-component.sh dist "${GITHUB_REF_NAME#v}"

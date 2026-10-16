@@ -3,6 +3,14 @@ check:
     just fmt-check
     just clippy
     just test
+    just component-dist-test
+    just component-dist-publish-test
+
+component-dist-test:
+    bash scripts/tests/package-component.test.sh
+
+component-dist-publish-test:
+    bash scripts/tests/publish-component.test.sh
 
 fmt-check:
     cargo fmt --all -- --check
