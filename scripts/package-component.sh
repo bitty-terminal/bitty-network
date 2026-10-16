@@ -52,6 +52,15 @@ valid_cdn_base() {
 	[[ "$1" =~ ^https://[A-Za-z0-9.-]+$ ]]
 }
 
+validate_archive_version() {
+	local archive="$1"
+	local archive_descriptor archive_version
+	archive_descriptor="$(tar -xOzf "$archive" "$DESCRIPTOR_FILE" 2>/dev/null)" || die "archive has no readable $DESCRIPTOR_FILE: $archive"
+	archive_version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' <<<"$archive_descriptor")"
+	valid_version "$archive_version" || die "archive has an invalid descriptor version: $archive"
+	[[ "$archive_version" == "$VERSION" ]] || die "archive version $archive_version differs from requested version $VERSION: $archive"
+}
+
 if command -v sha256sum >/dev/null 2>&1; then
 	SHA256SUM=(sha256sum)
 elif command -v shasum >/dev/null 2>&1; then
@@ -136,6 +145,16 @@ if [[ "$OUTPUT" != /* ]]; then
 	OUTPUT="$PWD/${OUTPUT#./}"
 fi
 output_dir="$(dirname -- "$OUTPUT")"
+mkdir -p -- "$output_dir"
+shopt -s nullglob
+existing_tarballs=("$output_dir"/*.tar.gz)
+shopt -u nullglob
+for candidate in "${existing_tarballs[@]}"; do
+	[[ -f "$candidate" && ! -L "$candidate" ]] || die "archive is not a regular file: $candidate"
+	candidate_name="$(basename -- "$candidate")"
+	valid_target "${candidate_name%.tar.gz}" || die "archive basename is not a target triple: $candidate_name"
+	[[ "$candidate" == "$OUTPUT" ]] || validate_archive_version "$candidate"
+done
 scratch_root="${TMPDIR:-/tmp/bitty}"
 mkdir -p -- "$scratch_root"
 stage_dir="$(mktemp -d "$scratch_root/component-package.XXXXXX")"
@@ -154,15 +173,11 @@ fi
 cp -- "$BINARY" "$stage_dir/$archive_executable"
 chmod 755 "$stage_dir/$archive_executable"
 
-mkdir -p -- "$output_dir"
 rm -f -- "$OUTPUT"
 tar -czf "$OUTPUT" -C "$stage_dir" "$DESCRIPTOR_FILE" "$archive_executable"
 expected_members="$(printf '%s\n%s\n' "$DESCRIPTOR_FILE" "$archive_executable" | LC_ALL=C sort)"
 actual_members="$(tar -tzf "$OUTPUT" | LC_ALL=C sort)"
 [[ "$actual_members" == "$expected_members" ]] || die "archive members are not exactly descriptor plus executable"
-
-archive_name="$(basename -- "$OUTPUT")"
-(cd -- "$output_dir" && "${SHA256SUM[@]}" "$archive_name" >"$archive_name.sha256")
 
 shopt -s nullglob
 tarballs=()
@@ -177,6 +192,12 @@ shopt -u nullglob
 [[ "${#tarballs[@]}" -gt 0 ]] || die "no target archives found in $output_dir"
 printf '%s\n' "${tarballs[@]}" | LC_ALL=C sort >"$output_dir/.component-targets"
 mapfile -t archive_names <"$output_dir/.component-targets"
+(cd -- "$output_dir" && for archive_name in "${archive_names[@]}"; do
+	"${SHA256SUM[@]}" "$archive_name" >"$archive_name.sha256"
+done)
+for archive_name in "${archive_names[@]}"; do
+	validate_archive_version "$output_dir/$archive_name"
+done
 (cd -- "$output_dir" && "${SHA256SUM[@]}" "${archive_names[@]}" | LC_ALL=C sort -k2 >SHA256SUMS)
 rm -f -- "$output_dir/.component-targets"
 (cd -- "$output_dir" && "${SHA256SUM[@]}" -c SHA256SUMS >/dev/null) || die "SHA256SUMS verification failed"

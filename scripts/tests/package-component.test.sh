@@ -14,14 +14,19 @@ trap cleanup EXIT
 source_dir="$TMP_BASE/source"
 output_dir="$TMP_BASE/output"
 mkdir -p -- "$source_dir" "$output_dir"
-printf '#!/bin/sh\necho bitty-net 0.0.1\n' >"$source_dir/bitty-net"
+version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
+[[ -n "$version" ]] || {
+	printf 'root descriptor version is missing\n' >&2
+	exit 1
+}
+printf '#!/bin/sh\necho bitty-net %s\n' "$version" >"$source_dir/bitty-net"
 chmod 755 "$source_dir/bitty-net"
 
-"$SCRIPT" --version 0.0.1 --target x86_64-unknown-linux-gnu \
+"$SCRIPT" --version "$version" --target x86_64-unknown-linux-gnu \
 	--binary "$source_dir/bitty-net" --output "$output_dir/x86_64-unknown-linux-gnu.tar.gz"
-printf '#!/bin/sh\necho bitty-net 0.0.1 arm\n' >"$source_dir/bitty-net-arm"
+printf '#!/bin/sh\necho bitty-net %s arm\n' "$version" >"$source_dir/bitty-net-arm"
 chmod 755 "$source_dir/bitty-net-arm"
-"$SCRIPT" --version 0.0.1 --target aarch64-unknown-linux-gnu \
+"$SCRIPT" --version "$version" --target aarch64-unknown-linux-gnu \
 	--binary "$source_dir/bitty-net-arm" --output "$output_dir/aarch64-unknown-linux-gnu.tar.gz"
 
 expected_files=$'SHA256SUMS\naarch64-unknown-linux-gnu.tar.gz\naarch64-unknown-linux-gnu.tar.gz.sha256\nx86_64-unknown-linux-gnu.tar.gz\nx86_64-unknown-linux-gnu.tar.gz.sha256'
@@ -43,17 +48,32 @@ for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
 	mkdir -p "$extract"
 	tar -xzf "$archive" -C "$extract"
 	grep -Fx 'name = "net"' "$extract/bitty-component.toml" >/dev/null
-	grep -Fx 'version = "0.0.1"' "$extract/bitty-component.toml" >/dev/null
+	grep -Fx "version = \"$version\"" "$extract/bitty-component.toml" >/dev/null
 	grep -Fx 'protocol = [1, 1]' "$extract/bitty-component.toml" >/dev/null
 	grep -Fx 'executable = "bitty-net"' "$extract/bitty-component.toml" >/dev/null
 	digest="$(sha256sum "$extract/bitty-net" | awk '{print $1}')"
 	grep -Fx "sha256 = \"$digest\"" "$extract/bitty-component.toml" >/dev/null
 done
 
-urls="$(BITTY_CDN_BASE=https://cdn.bitty.run "$SCRIPT" --print-url --version 0.0.1 --target x86_64-unknown-linux-gnu)"
-[[ "$urls" == $'https://cdn.bitty.run/extensions/net/0.0.1/x86_64-unknown-linux-gnu.tar.gz\nhttps://cdn.bitty.run/extensions/net/0.0.1/SHA256SUMS' ]]
+urls="$(BITTY_CDN_BASE=https://cdn.bitty.run "$SCRIPT" --print-url --version "$version" --target x86_64-unknown-linux-gnu)"
+expected_urls="$(printf 'https://cdn.bitty.run/extensions/net/%s/x86_64-unknown-linux-gnu.tar.gz\nhttps://cdn.bitty.run/extensions/net/%s/SHA256SUMS' "$version" "$version")"
+[[ "$urls" == "$expected_urls" ]]
 
-if GITHUB_REF_TYPE=branch R2_BUCKET=unused "$PWD/scripts/publish-component.sh" "$output_dir" 0.0.1 >/dev/null 2>&1; then
+stale_dir="$TMP_BASE/stale"
+stale_extract="$TMP_BASE/stale-extract"
+mkdir -p -- "$stale_dir"
+mkdir -p -- "$stale_extract"
+tar -xzf "$output_dir/x86_64-unknown-linux-gnu.tar.gz" -C "$stale_extract"
+sed -i 's/^version = ".*"$/version = "9.9.9"/' "$stale_extract/bitty-component.toml"
+tar -czf "$stale_dir/aarch64-unknown-linux-gnu.tar.gz" -C "$stale_extract" bitty-component.toml bitty-net
+if "$SCRIPT" --version "$version" --target x86_64-unknown-linux-gnu \
+	--binary "$source_dir/bitty-net" --output "$stale_dir/x86_64-unknown-linux-gnu.tar.gz" \
+	>/dev/null 2>&1; then
+	printf 'packager accepted an archive with a stale descriptor version\n' >&2
+	exit 1
+fi
+
+if GITHUB_REF_TYPE=branch R2_BUCKET=unused "$PWD/scripts/publish-component.sh" "$output_dir" "$version" >/dev/null 2>&1; then
 	printf 'publisher accepted a non-tag ref\n' >&2
 	exit 1
 fi

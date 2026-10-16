@@ -23,17 +23,66 @@ die() {
 [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || die "CLOUDFLARE_ACCOUNT_ID is required"
 command -v "$WRANGLER_BIN" >/dev/null 2>&1 || die "wrangler is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+command -v cmp >/dev/null 2>&1 || die "cmp is required"
 
-mapfile -t files < <(find "$PACKAGE_DIR" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+valid_target() {
+	[[ "$1" =~ ^[a-z0-9_]+(-[a-z0-9_]+)+$ ]]
+}
+
+mapfile -t files < <(find "$PACKAGE_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
 [[ "${#files[@]}" -gt 1 ]] || die "package directory is empty"
-[[ " ${files[*]} " == *" SHA256SUMS "* ]] || die "package is missing SHA256SUMS"
-(cd "$PACKAGE_DIR" && sha256sum -c SHA256SUMS >/dev/null) || die "SHA256SUMS does not verify"
+for file in "${files[@]}"; do
+	[[ -f "$PACKAGE_DIR/$file" && ! -L "$PACKAGE_DIR/$file" ]] || die "package entry is not a regular file: $file"
+done
+[[ -f "$PACKAGE_DIR/SHA256SUMS" ]] || die "package is missing SHA256SUMS"
 
+archive_names=()
+sidecar_names=()
 for file in "${files[@]}"; do
 	case "$file" in
-	SHA256SUMS | *.tar.gz | *.tar.gz.sha256) ;;
+	SHA256SUMS) ;;
+	*.tar.gz)
+		valid_target "${file%.tar.gz}" || die "archive basename is not a target triple: $file"
+		archive_names+=("$file")
+		;;
+	*.tar.gz.sha256)
+		valid_target "${file%.tar.gz.sha256}" || die "sidecar basename is not a target triple: $file"
+		sidecar_names+=("$file")
+		;;
 	*) die "unexpected package file: $file" ;;
 	esac
+done
+[[ "${#archive_names[@]}" -gt 0 ]] || die "package contains no archives"
+[[ "${#archive_names[@]}" == "${#sidecar_names[@]}" ]] || die "every archive must have one sidecar"
+
+expected_files=(SHA256SUMS)
+for archive in "${archive_names[@]}"; do
+	expected_files+=("$archive" "$archive.sha256")
+done
+expected_file_list="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort)"
+actual_file_list="$(printf '%s\n' "${files[@]}")"
+[[ "$actual_file_list" == "$expected_file_list" ]] || die "package file set is not exactly archives, sidecars, and SHA256SUMS"
+
+manifest_names=()
+while IFS= read -r line; do
+	[[ "$line" =~ ^[0-9a-f]{64}[[:space:]]{2}([^[:space:]]+)$ ]] || die "SHA256SUMS contains a malformed line"
+	manifest_name="${BASH_REMATCH[1]}"
+	[[ "$manifest_name" == *.tar.gz ]] || die "SHA256SUMS lists a non-archive: $manifest_name"
+	valid_target "${manifest_name%.tar.gz}" || die "SHA256SUMS lists an invalid archive: $manifest_name"
+	[[ -f "$PACKAGE_DIR/$manifest_name" ]] || die "SHA256SUMS lists a missing archive: $manifest_name"
+	for existing in "${manifest_names[@]}"; do
+		[[ "$existing" != "$manifest_name" ]] || die "SHA256SUMS lists an archive more than once: $manifest_name"
+	done
+	manifest_names+=("$manifest_name")
+done <"$PACKAGE_DIR/SHA256SUMS"
+[[ "${#manifest_names[@]}" == "${#archive_names[@]}" ]] || die "SHA256SUMS does not list exactly every archive"
+expected_manifest="$(printf '%s\n' "${archive_names[@]}" | LC_ALL=C sort)"
+actual_manifest="$(printf '%s\n' "${manifest_names[@]}" | LC_ALL=C sort)"
+[[ "$actual_manifest" == "$expected_manifest" ]] || die "SHA256SUMS archive set is incomplete or has extras"
+(cd "$PACKAGE_DIR" && sha256sum -c SHA256SUMS >/dev/null) || die "SHA256SUMS does not verify"
+
+for archive in "${archive_names[@]}"; do
+	cmp -s <(cd "$PACKAGE_DIR" && sha256sum "$archive") "$PACKAGE_DIR/$archive.sha256" || die "sidecar digest does not match archive: $archive.sha256"
 done
 
 scratch_root="${TMPDIR:-/tmp/bitty}"

@@ -53,8 +53,10 @@ scripts/package-component.sh \
 
 The script validates the strict version, component name, protocol range,
 executable name, binary size, and digest before creating output. It also
-verifies the archive member list and regenerates `SHA256SUMS` over every target
-archive already in the output directory.
+verifies the archive member list, rejects pre-existing archives whose embedded
+descriptor version differs, and regenerates `SHA256SUMS` over every target
+archive in the output directory. The publisher rejects extra files, requires
+an exact archive-to-manifest set, and verifies every archive sidecar.
 
 The pure URL mapping is available without a build or filesystem write:
 
@@ -76,5 +78,6 @@ untouched; a different object or an indeterminate get failure aborts the job.
 Every new put is fetched again and compared byte-for-byte. Versioned objects
 use immutable cache headers and are never overwritten.
 
-No tag is created or uploaded by local packaging commands. The fixture gate
-is available as `just component-dist-test` and uses no network access.
+No tag is created or uploaded by local packaging commands. The package and
+publisher fixture gates are available as `just component-dist-test` and
+`just component-dist-publish-test`; both use no network access.
