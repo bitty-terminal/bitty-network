@@ -23,7 +23,7 @@ aws-lc-rs = { version = "=1.18.1", default-features = false, features = ["alloc"
 # rcgen at runtime. `aws_lc_rs` keeps one crypto provider in the graph.
 rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs"] }
 # TLS 1.3 client configuration, custom certificate verifier, and handshake.
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws-lc-rs"] }
 rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
 # rcgen's public validity fields are `time::OffsetDateTime`. The `parsing`
 # feature is deliberately off: this crate only constructs timestamps from Unix
@@ -35,4 +35,4 @@ zeroize = { version = "=1.9.0", features = ["alloc"] }
 # The TLS 1.2 refusal test needs a server that offers only TLS 1.2. The
 # production dependency above stays TLS 1.3-only; this additive dev feature is
 # test-only and does not change the shipped client configuration.
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }

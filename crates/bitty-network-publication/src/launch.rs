@@ -284,10 +284,12 @@ fn fresh_serial() -> Result<[u8; SERIAL_BYTES], LaunchMaterialError> {
         .fill(&mut serial)
         .map_err(|_| LaunchMaterialError::Random)?;
     // Keep the DER INTEGER positive without adding a leading zero byte, and
-    // make all-zero (non-conforming) serials impossible.
+    // keep the first byte non-zero so the encoded INTEGER always spans
+    // SERIAL_BYTES: yasna strips leading zero bytes, which would otherwise
+    // make a short serial appear intermittently.
     serial[0] &= 0x7f;
-    if serial.iter().all(|byte| *byte == 0) {
-        serial[SERIAL_BYTES - 1] = 1;
+    if serial[0] == 0 {
+        serial[0] = 1;
     }
     Ok(serial)
 }
