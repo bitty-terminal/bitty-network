@@ -1,0 +1,38 @@
+[package]
+name = "bitty-network-publication"
+description = "Launch-scoped mutual-certificate provider-publication control transport (Core side)"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitty-terminal/bitty-network"
+keywords = ["tls", "bitty", "provider-publication"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# SHA-256 over leaf certificate DER plus OS-random serials. The workspace
+# already resolves aws-lc-rs through rustls; this crate reuses that provider
+# family instead of adding a second crypto implementation.
+aws-lc-rs = { version = "=1.18.1", default-features = false, features = ["alloc", "aws-lc-sys"] }
+# Runtime launch-material generation: per-launch ECDSA P-256 keypairs and
+# self-signed leaves. Unlike bitty-network-tls (dev-only use), this crate needs
+# rcgen at runtime. `aws_lc_rs` keeps one crypto provider in the graph.
+rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs"] }
+# TLS 1.3 client configuration, custom certificate verifier, and handshake.
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
+# rcgen's public validity fields are `time::OffsetDateTime`. The `parsing`
+# feature is deliberately off: this crate only constructs timestamps from Unix
+# seconds and never parses calendar text.
+time = { version = "=0.3.41", default-features = false, features = ["std"] }
+zeroize = { version = "=1.9.0", features = ["alloc"] }
+
+[dev-dependencies]
+# The TLS 1.2 refusal test needs a server that offers only TLS 1.2. The
+# production dependency above stays TLS 1.3-only; this additive dev feature is
+# test-only and does not change the shipped client configuration.
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
