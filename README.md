@@ -18,18 +18,21 @@ bitty-network            # HTTP/WebSocket backends
     ↑
 bitty-net                # stdio coprocess component (wire protocol v1)
 
+bitty-network-publication # launch-scoped publication control TLS (Core side)
 bitty-network-wire       # wire protocol v1 codec (std only; linked by core)
 ```
 
 ### Crates
 
 - **`bitty-network-api`** — Light contract layer (request/response types, capability definitions, service traits). Zero implementation dependencies. This is the only crate plugins and cross-repo consumers ever depend on.
-  
+
 - **`bitty-network-core`** — Shared core functionality: diagnostics, policy vocabulary, runtime markers, protocol helpers.
 
 - **`bitty-network-dns`** — DNS resolution with bounded LRU cache, per-record deadlines, and redacted diagnostic snapshots.
 
 - **`bitty-network-tls`** — TLS trust provider: CA bundles, platform verifier, client identity (mTLS), X.509 certificate parsing.
+
+- **`bitty-network-publication`** — Core-side launch-scoped mutual-certificate provider-publication control transport: per-launch ECDSA P-256 leaves, the bounded bootstrap manifest, and a certificate-pinned TLS 1.3 client over an injected stream. No listener, socket, spawn, or control-record state machine in this slice.
 
 - **`bitty-network`** — The real implementation (async runtime, transport, HTTP/WebSocket, proxy, policy) behind default-off Cargo features.
 
@@ -117,7 +120,7 @@ See `docs/lua-integration/design.md` for the complete Lua API design.
 
 ## Layout
 
-- `crates/` — workspace members (bitty-network-api, bitty-network-core, bitty-network-dns, bitty-network-tls, bitty-network, bitty-network-wire, bitty-net, bitty-network-lua)
+- `crates/` — workspace members (bitty-network-api, bitty-network-core, bitty-network-dns, bitty-network-tls, bitty-network-publication, bitty-network, bitty-network-wire, bitty-net, bitty-network-lua)
 - `docs/` — architecture and integration documentation
 
 ## Gates

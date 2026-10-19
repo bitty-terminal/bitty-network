@@ -126,6 +126,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitty-network-publication"
+version = "0.0.1"
+dependencies = [
+ "aws-lc-rs",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "time",
+ "zeroize",
+]
+
+[[package]]
 name = "bitty-network-tls"
 version = "0.0.1"
 dependencies = [

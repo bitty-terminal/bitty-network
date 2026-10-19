@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Feature** (CTX-0075): `bitty-network-publication` crate — Core-side
+  launch-scoped mutual-certificate provider-publication control transport.
+  Generates fresh ECDSA P-256 `core-supervisor`/`ai-helper` leaves per launch,
+  encodes the bounded launch manifest and key-material block, and establishes
+  a certificate-pinned TLS 1.3 client with ALPN
+  `provider-publication-control/1` over an injected stream. Spawn/bootstrap
+  handle wiring, control-record state, and strict enablement stay out of this
+  slice.
 - **Feature** (#71, DIR-030): `bitty-network-wire` crate — native-component
   wire protocol v1 codec (u32 big-endian length framing, 256 KiB frames,
   fixed message tags, bounded fail-closed decoding; `std` only).
