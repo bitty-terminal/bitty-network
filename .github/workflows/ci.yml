@@ -343,6 +343,7 @@ jobs:
       - name: Build and pack the target tarball
         env:
           TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
           set -euo pipefail
           version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
@@ -375,6 +376,7 @@ jobs:
       - name: Emit the catalog row for this target
         env:
           TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
           set -euo pipefail
           scripts/component-release.sh catalog --dist dist --output "catalog/$TARGET.catalog.v1"
