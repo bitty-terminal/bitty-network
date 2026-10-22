@@ -149,12 +149,14 @@ mkdir -p -- "$output_dir"
 shopt -s nullglob
 existing_tarballs=("$output_dir"/*.tar.gz)
 shopt -u nullglob
-for candidate in "${existing_tarballs[@]}"; do
-	[[ -f "$candidate" && ! -L "$candidate" ]] || die "archive is not a regular file: $candidate"
-	candidate_name="$(basename -- "$candidate")"
-	valid_target "${candidate_name%.tar.gz}" || die "archive basename is not a target triple: $candidate_name"
-	[[ "$candidate" == "$OUTPUT" ]] || validate_archive_version "$candidate"
-done
+if [[ "${#existing_tarballs[@]}" -gt 0 ]]; then
+	for candidate in "${existing_tarballs[@]}"; do
+		[[ -f "$candidate" && ! -L "$candidate" ]] || die "archive is not a regular file: $candidate"
+		candidate_name="$(basename -- "$candidate")"
+		valid_target "${candidate_name%.tar.gz}" || die "archive basename is not a target triple: $candidate_name"
+		[[ "$candidate" == "$OUTPUT" ]] || validate_archive_version "$candidate"
+	done
+fi
 scratch_root="${TMPDIR:-/tmp/bitty}"
 mkdir -p -- "$scratch_root"
 stage_dir="$(mktemp -d "$scratch_root/component-package.XXXXXX")"
@@ -191,7 +193,13 @@ done
 shopt -u nullglob
 [[ "${#tarballs[@]}" -gt 0 ]] || die "no target archives found in $output_dir"
 printf '%s\n' "${tarballs[@]}" | LC_ALL=C sort >"$output_dir/.component-targets"
-mapfile -t archive_names <"$output_dir/.component-targets"
+# Bash 3.2 (the macOS default shell) has no `mapfile`; read the sorted list
+# portably so the packer runs unchanged on every native runner.
+archive_names=()
+while IFS= read -r archive_name; do
+	[[ -n "$archive_name" ]] || continue
+	archive_names+=("$archive_name")
+done <"$output_dir/.component-targets"
 (cd -- "$output_dir" && for archive_name in "${archive_names[@]}"; do
 	"${SHA256SUM[@]}" "$archive_name" >"$archive_name.sha256"
 done)
