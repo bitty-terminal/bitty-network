@@ -7,6 +7,11 @@ This repository packages the `net` native component, whose executable is
 registry entry. Registry integration and user-facing install resolution remain
 outside this repository.
 
+The supported target set, per-target CI evidence, documented exclusions, and
+the `extensions/catalog.v1` row contract are defined in
+[component-release-matrix.md](component-release-matrix.md) and
+`component-targets.toml`.
+
 ## Package Shape
 
 The root `bitty-component.toml` is a parser-compatible template for version
@@ -21,9 +26,11 @@ bitty-component.toml
 bitty-net                 # bitty-net.exe on Windows targets
 ```
 
-The output directory contains one archive per target, one `.sha256` sidecar
-per archive, and the aggregate `SHA256SUMS` file. No wrapper directory or
-other package member is permitted.
+The output directory contains one archive per supported target, one `.sha256`
+sidecar per archive, and the aggregate `SHA256SUMS` file. No wrapper directory
+or other package member is permitted. Only targets declared
+`supported = true` in `component-targets.toml` can appear; an archive for an
+unsupported triple fails the manifest and catalog gates.
 
 ```text
 extensions/net/<version>/<target>.tar.gz
@@ -68,8 +75,11 @@ scripts/package-component.sh --print-url --version 0.0.1 \
 ## Tag Publication
 
 The component distribution workflow runs only for strict `vX.Y.Z` tag pushes.
-It builds the current `bitty-net`, packages the target artifact, and publishes
-the package directory to the configured R2 bucket under `extensions/net/`.
+It first runs the repository gates, then packages every supported target on
+its native runner (`cargo check`, `cargo test -p bitty-net`, pack, native
+`--version` execution, catalog row), and only after every leg succeeds does the
+aggregate job regenerate `SHA256SUMS` and run the full-matrix verifier. A
+partial or unverified target set never reaches the publisher.
 The publisher requires `R2_BUCKET`, `CLOUDFLARE_ACCOUNT_ID`, and
 `CLOUDFLARE_API_TOKEN` from the workflow environment.
 
@@ -78,6 +88,12 @@ untouched; a different object or an indeterminate get failure aborts the job.
 Every new put is fetched again and compared byte-for-byte. Versioned objects
 use immutable cache headers and are never overwritten.
 
+The publisher uploads payloads only (tarballs, sidecars, `SHA256SUMS`). The
+verified `catalog.v1` row fragment is not uploaded here: `extensions/catalog.v1`
+is a single shared object across components, so a per-component fragment would
+clobber other rows. A future catalog merge job owns that key.
+
 No tag is created or uploaded by local packaging commands. The package and
-publisher fixture gates are available as `just component-dist-test` and
-`just component-dist-publish-test`; both use no network access.
+publisher fixture gates are available as `just component-dist-test`,
+`just component-release-test`, and `just component-dist-publish-test`; all use
+no network access.

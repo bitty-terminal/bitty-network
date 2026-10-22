@@ -5,6 +5,14 @@ check:
     just test
     just component-dist-test
     just component-dist-publish-test
+    just component-release-check
+    just component-release-test
+
+component-release-check:
+    ./scripts/component-release.sh check
+
+component-release-test:
+    ./scripts/tests/component-release.test.sh
 
 component-dist-test:
     bash scripts/tests/package-component.test.sh
