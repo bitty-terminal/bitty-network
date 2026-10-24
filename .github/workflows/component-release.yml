@@ -13,14 +13,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  package:
-    name: Package net component
+  verify:
+    name: Repository gates before packaging
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: "1.58.0"
       - name: Resolve Rust channel
         id: rust-channel
         run: |
@@ -30,7 +32,7 @@ jobs:
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: rustfmt, clippy
-      - name: Verify tag version
+      - name: Verify tag version and descriptor identity
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -40,30 +42,135 @@ jobs:
           cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           test "$version" = "$descriptor_version"
           test "$version" = "$cargo_version"
-      - name: Run Rust quality gates
+          grep -Fx 'name = "net"' bitty-component.toml >/dev/null
+          grep -Fx 'executable = "bitty-net"' bitty-component.toml >/dev/null
+          grep -Fx 'protocol = [1, 1]' bitty-component.toml >/dev/null
+      - name: Run repository gates
         run: just check
-      - name: Build and package Linux x86_64
-        env:
-          TAG: ${{ github.ref_name }}
+
+  targets:
+    name: Resolve the supported release matrix
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate the release matrix and supported-target gate
+        run: scripts/component-release.sh check
+      - name: Emit GitHub Actions matrix
+        id: matrix
         run: |
           set -euo pipefail
-          version="${TAG#v}"
-          cargo build --release --locked -p bitty-net --target x86_64-unknown-linux-gnu
-          mkdir -p dist
+          matrix="$(scripts/component-release.sh targets --format json)"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package net ${{ matrix.target }}
+    needs: targets
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve Rust channel (rust-toolchain.toml)
+        id: rust-channel
+        shell: bash
+        run: |
+          channel="$(scripts/rust-channel.sh)"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ steps.rust-channel.outputs.channel }}
+          components: clippy
+      - name: Native compile and test evidence
+        shell: bash
+        run: |
+          cargo check --workspace --all-targets --locked
+          cargo test -p bitty-net --locked
+      - name: Build and pack the target tarball
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/bitty-net"
+          case "$TARGET" in
+          *-windows-*) binary="$binary.exe" ;;
+          esac
+          cargo build --release --locked -p bitty-net --target "$TARGET"
           scripts/package-component.sh \
-            --version "$version" \
-            --target x86_64-unknown-linux-gnu \
-            --binary target/x86_64-unknown-linux-gnu/release/bitty-net \
-            --output dist/x86_64-unknown-linux-gnu.tar.gz
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            --version "${TAG#v}" \
+            --target "$TARGET" \
+            --binary "$binary" \
+            --output "dist/$TARGET.tar.gz"
+      - name: Run the packaged binary on the native host
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/bitty-net"
+          case "$TARGET" in
+          *-windows-*) binary="$binary.exe" ;;
+          esac
+          test "$("$binary" --version)" = "bitty-net ${TAG#v}"
+      - name: Emit the catalog row for this target
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/component-release.sh catalog --dist dist --output "catalog/$TARGET.catalog.v1"
+          test "$(grep -c '^extension ' "catalog/$TARGET.catalog.v1")" = "1"
+          grep -F " $TARGET " "catalog/$TARGET.catalog.v1"
+      - name: Upload the verified target package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: net-component-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  aggregate:
+    name: Aggregate manifest and catalog rows
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: net-component-*
+          merge-multiple: true
+          path: dist
+      - name: Regenerate the aggregate SHA256SUMS
+        run: scripts/component-release.sh manifest --dist dist
+      - name: Verify the full supported matrix and descriptor chain
+        run: scripts/component-release.sh verify --dist dist
+      - name: Emit the catalog.v1 row fragment
+        run: scripts/component-release.sh catalog --dist dist --output catalog/catalog.v1
+      - name: Show the verified catalog fragment
+        run: cat catalog/catalog.v1
+      - name: Upload the verified release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: net-component-package
-          path: dist/
+          path: |
+            dist/
+            catalog/
           if-no-files-found: error
 
   publish:
     name: Publish net component to R2
-    needs: package
+    needs: aggregate
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -77,14 +184,19 @@ jobs:
       - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
         with:
           name: net-component-package
-          path: dist
+          path: package
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - name: Install Wrangler
         run: bun add --global wrangler@4.135.0
-      - name: Publish immutable package
+      - name: Publish the immutable payload directory
         env:
           GITHUB_REF_TYPE: tag
           GITHUB_REF_NAME: ${{ github.ref_name }}
-        run: scripts/publish-component.sh dist "${GITHUB_REF_NAME#v}"
+        # Payloads only (tarballs, sidecars, SHA256SUMS). The catalog fragment
+        # is produced and verified by the aggregate job but is NOT uploaded
+        # here: extensions/catalog.v1 is one shared object across components,
+        # so a single-component fragment would clobber other rows. The future
+        # catalog merge job owns that key.
+        run: scripts/publish-component.sh package/dist "${GITHUB_REF_NAME#v}"

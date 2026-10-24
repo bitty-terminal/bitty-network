@@ -1,0 +1,82 @@
+# component-targets.toml — supported release targets for the `net` component
+# (issue bitty-terminal/bitty#2491, milestone 0.0.27).
+#
+# Single source of truth for `scripts/component-release.sh`: the CI and
+# release workflows consume `targets --format json`, the pack/verify steps
+# consume the same rows, and only a `supported = true` row can ever produce a
+# tarball, `SHA256SUMS` entry, or `extensions/catalog.v1` row.
+#
+# `triple` must be one of the host triples the Core installer requests
+# (`host_target_triple` in `bitty/crates/bitty-terminal/src/component_seed.rs`).
+# `os` and `arch` must match that triple; `runner` is the GitHub-hosted
+# runner label that proves the target natively (compile, test, run, pack).
+#
+# The gate `scripts/component-release.sh check` fails when no target is
+# supported, when a supported target lacks a runner, when an unsupported
+# target lacks a reason, or when a triple is duplicated or unknown.
+
+schema = 1
+
+# Linux glibc x86_64: native ubuntu-24.04 build, test, run, pack.
+[[target]]
+triple = "x86_64-unknown-linux-gnu"
+os = "linux"
+arch = "x86_64"
+runner = "ubuntu-24.04"
+supported = true
+
+# Linux glibc aarch64: native arm64 runner (public repository). The HTTP
+# backend's aws-lc-sys C dependency builds with the runner's native toolchain.
+[[target]]
+triple = "aarch64-unknown-linux-gnu"
+os = "linux"
+arch = "aarch64"
+runner = "ubuntu-24.04-arm"
+supported = true
+
+# macOS arm64: native Apple-silicon runner.
+[[target]]
+triple = "aarch64-apple-darwin"
+os = "macos"
+arch = "aarch64"
+runner = "macos-15"
+supported = true
+
+# macOS x86_64: native Intel runner.
+[[target]]
+triple = "x86_64-apple-darwin"
+os = "macos"
+arch = "x86_64"
+runner = "macos-15-intel"
+supported = true
+
+# Windows x86_64 (MSVC): native windows-2025 runner, `.exe` archive member.
+[[target]]
+triple = "x86_64-pc-windows-msvc"
+os = "windows"
+arch = "x86_64"
+runner = "windows-2025"
+supported = true
+
+# Documented exclusions: the installer can request these triples on those
+# hosts, but this repository publishes no bytes for them. They must stay out
+# of the manifest and the catalog instead of shipping unverified artifacts.
+
+# Alpine/musl x86_64 hosts request the musl triple. The component links
+# against glibc; a static musl build (including the HTTP backend's C
+# dependency) needs its own toolchain proof and is out of the 0.0.27 scope.
+[[target]]
+triple = "x86_64-unknown-linux-musl"
+os = "linux"
+arch = "x86_64"
+supported = false
+reason = "glibc-only build; Alpine/musl hosts request a static musl artifact that is deferred until a dedicated build-and-test proof lands"
+
+# Windows arm64 hosts request this triple. 0.0.27 publishes Windows x86_64
+# only; a Windows arm64 runner and ABI proof are follow-ups.
+[[target]]
+triple = "aarch64-pc-windows-msvc"
+os = "windows"
+arch = "aarch64"
+supported = false
+reason = "out of the 0.0.27 scope; needs a Windows arm64 native runner and ABI proof before any artifact is published"
