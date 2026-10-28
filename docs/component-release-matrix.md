@@ -47,10 +47,10 @@ repository publishes nothing for them. They are recorded with a `reason` in
 `component-targets.toml`; the verifier refuses any tarball or catalog row for
 an unsupported triple.
 
-| Target triple               | Why excluded                                                                                                                                                                                                                                                                                                    |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `x86_64-unknown-linux-musl` | The shipped graph is not pure Rust: `bitty-network-tls` enables rustls' `aws-lc-rs` provider, so `aws-lc-sys` compiles C/assembly through cmake, and `rustls-platform-verifier` reads the platform trust store at runtime. A static musl artifact needs an Alpine toolchain build plus a native musl run first. |
-| `aarch64-pc-windows-msvc`   | `aws-lc-sys` needs a clang/LLVM plus cmake assembler path for its Windows ARM64 crypto code, and the MSVC arm64 CRT and `rustls-platform-verifier` Windows arm64 backend are separate ABI targets. This repository has no native arm64 Windows runner, so the target is unproven.                               |
+| Target triple               | Why excluded                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x86_64-unknown-linux-musl` | The shipped graph is not pure Rust: `bitty-network-tls` enables rustls' `aws-lc-rs` provider, so `aws-lc-sys` compiles C/assembly through cmake, and `rustls-platform-verifier` reads the platform trust store at runtime. A static musl artifact needs an Alpine toolchain build plus a native musl run first.                                                                        |
+| `aarch64-pc-windows-msvc`   | The `windows-11-arm` runner is generally available, but this matrix has not wired that leg and no arm64 Windows artifact has been built or run here. `aws-lc-sys` needs a clang/LLVM plus cmake assembler path for its Windows ARM64 crypto code, and the MSVC arm64 CRT and `rustls-platform-verifier` arm64 backend are separate ABI targets, so the assembler/ABI proof is the gap. |
 
 Both exclusions are dependency constraints, not policy preferences: neither
 target has native build-and-run evidence in this repository, so no bytes are
@@ -109,7 +109,7 @@ executable = "bitty-net"
 executable_sha256 = "<executable sha256>"
 ```
 
-`scripts/component-release.sh verify --record release/component-digests.toml`
+`scripts/component-release.sh verify --dist dist --record release/component-digests.toml`
 requires the record to name exactly the supported matrix and every digest to
 match the verified artifacts. The record is a release-candidate artifact, not
 an R2 object; it is written outside `dist/` so the publisher's exact file-set

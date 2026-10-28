@@ -81,14 +81,16 @@ arch = "x86_64"
 supported = false
 reason = "not a pure-Rust graph (aws-lc-sys C/asm plus platform trust-store lookup); a static musl artifact needs its own Alpine toolchain build and native run before any bytes are published"
 
-# Windows arm64 hosts request this triple. `aws-lc-sys` needs a clang/LLVM plus
-# cmake assembler path for its Windows ARM64 crypto code, and the MSVC arm64
-# CRT and `rustls-platform-verifier` Windows arm64 backend are separate ABI
-# targets. This repository has no native arm64 Windows runner (only the
-# x86_64 `windows-2025` leg is proven), so no arm64 bytes are published.
+# Windows arm64 hosts request this triple. The `windows-11-arm` GitHub-hosted
+# runner is generally available, so the gap is not a missing runner: this
+# matrix has not wired that leg and no arm64 Windows artifact has been built or
+# run here. `aws-lc-sys` also needs a clang/LLVM plus cmake assembler path for
+# its Windows ARM64 crypto code, and the MSVC arm64 CRT and
+# `rustls-platform-verifier` arm64 backend are separate ABI targets, so the
+# assembler/ABI proof is what has to land first.
 [[target]]
 triple = "aarch64-pc-windows-msvc"
 os = "windows"
 arch = "aarch64"
 supported = false
-reason = "no native arm64 Windows runner in this repository; aws-lc-sys needs a clang/cmake ARM64 assembler path and the MSVC arm64 ABI is unproven here"
+reason = "the windows-11-arm runner is generally available but this matrix has not wired that leg; the aws-lc-sys ARM64 assembler path and the MSVC arm64 ABI are unproven here"

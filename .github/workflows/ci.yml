@@ -346,8 +346,6 @@ jobs:
       - name: Native component test evidence
         run: cargo test -p bitty-net --locked
       - name: Clippy on the native component (deny warnings)
-        env:
-          RUSTFLAGS: "-D warnings"
         run: cargo clippy -p bitty-net --all-targets --locked -- -D warnings
       - name: Build and pack the target tarball
         env:

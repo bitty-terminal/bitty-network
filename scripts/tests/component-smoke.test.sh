@@ -97,7 +97,8 @@ hello = frame(sys.stdin.buffer)
 if not hello or hello[0] != 0x01:
     raise SystemExit(3)
 name = "other" if MODE == "bad-component" else "demo"
-send(b"\x02" + struct.pack(">H", 1) + text(name) + text("1.2.3"))
+version = "1.2.4" if MODE == "bad-ack-version" else "1.2.3"
+send(b"\x02" + struct.pack(">H", 1) + text(name) + text(version))
 
 request = frame(sys.stdin.buffer)
 if not request or request[0] != 0x10:
@@ -134,6 +135,10 @@ expect_failure "version mismatch" \
 
 expect_failure "HelloAck component mismatch" \
 	env FAKE_MODE=bad-component "$ROOT/scripts/component-release.sh" smoke \
+	--binary "$fake" --root "$fixture" --timeout 3
+
+expect_failure "HelloAck version mismatch" \
+	env FAKE_MODE=bad-ack-version "$ROOT/scripts/component-release.sh" smoke \
 	--binary "$fake" --root "$fixture" --timeout 3
 
 expect_failure "component that never replies" \
