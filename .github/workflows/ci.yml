@@ -270,6 +270,13 @@ jobs:
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          # The action runs inside an Alpine musl container whose rustup also
+          # honors rust-toolchain.toml. Without this input the container first
+          # reports "override toolchain 1.98.1-x86_64-unknown-linux-musl is not
+          # installed" and only then self-installs it; pinning the same channel
+          # here installs the toolchain the workspace asks for up front.
+          rust-version: ${{ steps.rust-channel.outputs.channel }}
         # NOTE: do NOT pass `arguments: check` — the action's `command`
         # input already defaults to `check`, and passing both yields
         # `check check` (invalid value for [WHICH], red supply-chain gate).

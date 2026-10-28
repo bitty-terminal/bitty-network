@@ -94,6 +94,16 @@ wildcards = "deny"
 # Duplicate versions from the icu patch updates (dependabot #84):
 # - synstructure 0.13.2 (via phodopus gc-arena-derive) alongside 0.14.0
 #   (via yoke-derive 0.8.4). Unifying is gc-arena upstream's release to make.
+#
+# Duplicate versions from the ring Windows bindings (checked 2026-10-28):
+# - windows-sys 0.52.0 (ring 0.17.14 -> rustls-webpki) alongside 0.61.2
+#   (mio 1.2.3 -> tokio 1.53.3, and rustls-platform-verifier/winapi-util after
+#   the tokio re-resolution). ring pins `windows-sys ^0.52` for its Windows
+#   bindings while mio requires 0.61, and no single version satisfies both, so
+#   the 0.x compatibility classes cannot be unified (`cargo update
+#   -p windows-sys@0.52.0 --precise 0.61.2` refuses). ring is still linked next
+#   to the aws-lc-rs provider through rustls-webpki. Unify when ring moves to
+#   windows-sys 0.61.
 skip = [
     { crate = "base64@0.22.1", reason = "reqwest-tree dupe, upstream unification pending" },
     { crate = "syn@2.0.119", reason = "reqwest-tree dupe, upstream unification pending" },
@@ -102,6 +112,7 @@ skip = [
     { crate = "getrandom@0.3.4", reason = "phodopus git dep uses getrandom 0.3.x, will unify on phodopus publish" },
     { crate = "r-efi@5.3.0", reason = "phodopus git dep uses r-efi 5.x, will unify on phodopus publish" },
     { crate = "synstructure@0.13.2", reason = "phodopus gc-arena pins 0.13.x, yoke-derive 0.8.4 uses 0.14.x; unify on gc-arena release" },
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17.14 pins windows-sys ^0.52 while mio 1.2.3 needs 0.61; unify when ring moves" },
 ]
 
 [sources]

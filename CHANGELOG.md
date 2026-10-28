@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Security** (CTX-0076): refreshed `rustls-webpki` 0.103.16,
+  `webpki-root-certs` 1.0.10, and `tokio` 1.53.3 for RUSTSEC-2026-0382,
+  RUSTSEC-2026-0383, and RUSTSEC-2026-0386. `deny.toml` records the
+  `windows-sys` 0.52/0.61 split that `ring`'s `^0.52` pin still forces next to
+  `mio`'s 0.61 requirement.
 - **Changed** (CTX-0076): the `net` component version moves to `0.0.2` in
   `bitty-component.toml` and the workspace `Cargo.toml`. Component artifacts
   are immutable per version, and `0.0.1` was already published with a
