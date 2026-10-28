@@ -71,6 +71,13 @@ fi
 command -v tar >/dev/null 2>&1 || die "tar is required"
 command -v gzip >/dev/null 2>&1 || die "gzip is required"
 
+# Print only the digest. Git-Bash/MSYS `sha256sum` defaults to binary mode and
+# prints "<hex> *<name>", while GNU text mode prints "<hex>  <name>"; reading
+# the first field keeps both platforms on the same canonical line format.
+digest_of() {
+	"${SHA256SUM[@]}" "$1" | awk '{print $1}'
+}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--target)
@@ -149,12 +156,14 @@ mkdir -p -- "$output_dir"
 shopt -s nullglob
 existing_tarballs=("$output_dir"/*.tar.gz)
 shopt -u nullglob
-for candidate in "${existing_tarballs[@]}"; do
-	[[ -f "$candidate" && ! -L "$candidate" ]] || die "archive is not a regular file: $candidate"
-	candidate_name="$(basename -- "$candidate")"
-	valid_target "${candidate_name%.tar.gz}" || die "archive basename is not a target triple: $candidate_name"
-	[[ "$candidate" == "$OUTPUT" ]] || validate_archive_version "$candidate"
-done
+if [[ "${#existing_tarballs[@]}" -gt 0 ]]; then
+	for candidate in "${existing_tarballs[@]}"; do
+		[[ -f "$candidate" && ! -L "$candidate" ]] || die "archive is not a regular file: $candidate"
+		candidate_name="$(basename -- "$candidate")"
+		valid_target "${candidate_name%.tar.gz}" || die "archive basename is not a target triple: $candidate_name"
+		[[ "$candidate" == "$OUTPUT" ]] || validate_archive_version "$candidate"
+	done
+fi
 scratch_root="${TMPDIR:-/tmp/bitty}"
 mkdir -p -- "$scratch_root"
 stage_dir="$(mktemp -d "$scratch_root/component-package.XXXXXX")"
@@ -174,7 +183,10 @@ cp -- "$BINARY" "$stage_dir/$archive_executable"
 chmod 755 "$stage_dir/$archive_executable"
 
 rm -f -- "$OUTPUT"
-tar -czf "$OUTPUT" -C "$stage_dir" "$DESCRIPTOR_FILE" "$archive_executable"
+# COPYFILE_DISABLE keeps macOS bsdtar from adding `._` AppleDouble members when
+# the payload has extended attributes; the archive must stay exactly two files.
+# Linux tar ignores the variable, so the bytes stay identical there.
+COPYFILE_DISABLE=1 tar -czf "$OUTPUT" -C "$stage_dir" "$DESCRIPTOR_FILE" "$archive_executable"
 expected_members="$(printf '%s\n%s\n' "$DESCRIPTOR_FILE" "$archive_executable" | LC_ALL=C sort)"
 actual_members="$(tar -tzf "$OUTPUT" | LC_ALL=C sort)"
 [[ "$actual_members" == "$expected_members" ]] || die "archive members are not exactly descriptor plus executable"
@@ -191,15 +203,33 @@ done
 shopt -u nullglob
 [[ "${#tarballs[@]}" -gt 0 ]] || die "no target archives found in $output_dir"
 printf '%s\n' "${tarballs[@]}" | LC_ALL=C sort >"$output_dir/.component-targets"
-mapfile -t archive_names <"$output_dir/.component-targets"
+# Bash 3.2 (the macOS default shell) has no `mapfile`; read the sorted list
+# portably so the packer runs unchanged on every native runner.
+archive_names=()
+while IFS= read -r archive_name; do
+	[[ -n "$archive_name" ]] || continue
+	archive_names+=("$archive_name")
+done <"$output_dir/.component-targets"
 (cd -- "$output_dir" && for archive_name in "${archive_names[@]}"; do
-	"${SHA256SUM[@]}" "$archive_name" >"$archive_name.sha256"
+	printf '%s  %s\n' "$(digest_of "$archive_name")" "$archive_name" >"$archive_name.sha256"
 done)
 for archive_name in "${archive_names[@]}"; do
 	validate_archive_version "$output_dir/$archive_name"
 done
-(cd -- "$output_dir" && "${SHA256SUM[@]}" "${archive_names[@]}" | LC_ALL=C sort -k2 >SHA256SUMS)
+(cd -- "$output_dir" && for archive_name in "${archive_names[@]}"; do
+	printf '%s  %s\n' "$(digest_of "$archive_name")" "$archive_name"
+done | LC_ALL=C sort -k2 >SHA256SUMS)
 rm -f -- "$output_dir/.component-targets"
-(cd -- "$output_dir" && "${SHA256SUM[@]}" -c SHA256SUMS >/dev/null) || die "SHA256SUMS verification failed"
+# Compare digests ourselves instead of `sha256sum -c`: check mode honors the
+# "<hex> *<name>" binary marker, and MSYS text mode would translate CRLF bytes
+# inside the tarball and corrupt the comparison.
+while read -r digest name; do
+	[[ -n "$digest" && -n "$name" ]] || die "SHA256SUMS contains an empty entry"
+	[[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "SHA256SUMS contains a malformed digest: $digest"
+	name="${name#\*}"
+	[[ "$name" != */* ]] || die "SHA256SUMS entry is not a plain filename: $name"
+	actual="$(digest_of "$output_dir/$name")"
+	[[ "$actual" == "$digest" ]] || die "SHA256SUMS verification failed for $name"
+done <"$output_dir/SHA256SUMS"
 
 printf 'package-component: PASS (target=%s, version=%s, output=%s)\n' "$TARGET" "$VERSION" "$OUTPUT"

@@ -5,6 +5,27 @@ check:
     just test
     just component-dist-test
     just component-dist-publish-test
+    just component-release-check
+    just component-release-test
+    just component-smoke-test
+
+component-release-check:
+    ./scripts/component-release.sh check
+
+component-release-test:
+    ./scripts/tests/component-release.test.sh
+
+component-smoke-test:
+    ./scripts/tests/component-smoke.test.sh
+
+# Protocol smoke against one packaged/built executable: Hello -> HelloAck, a
+# grant-refused HttpRequest -> offline Error, then a clean Shutdown exit.
+component-smoke binary:
+    ./scripts/component-release.sh smoke --binary "{{binary}}"
+
+# Write the per-target release digest record from a complete verified dist.
+component-release-record dist out="release/component-digests.toml":
+    ./scripts/component-release.sh record --dist "{{dist}}" --output "{{out}}"
 
 component-dist-test:
     bash scripts/tests/package-component.test.sh

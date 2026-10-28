@@ -4,3 +4,9 @@
 .carryctx/config.local.toml
 .worktrees/
 recording/
+dist/
+catalog/
+release/
+
+# Python bytecode from the release tooling (scripts/component_release.py)
+__pycache__/

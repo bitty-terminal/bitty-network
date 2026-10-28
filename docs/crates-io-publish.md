@@ -5,7 +5,7 @@ Priority: P2 | Area: area:packaging | Labels: feat,P2,area:packaging
 | Upstream: bitty-terminal/bitty#1512
 
 Scope is this repository only. This note records the first publish of the
-two registry-ready crates at version `0.0.1`, so the owner can execute it
+two registry-ready crates at version `0.0.2`, so the owner can execute it
 after the registry token rotation lands (see the Blockers section).
 
 ## Readiness (verified)
@@ -53,7 +53,7 @@ cargo publish -p bitty-network-wire
   (`cargo search <crate> --limit 1` for `bitty-network-api` and
   `bitty-network-wire` respectively).
 - From a clean consumer project outside this workspace, declare
-  `bitty-network-api = "=0.0.1"` and `bitty-network-wire = "=0.0.1"` under
+  `bitty-network-api = "=0.0.2"` and `bitty-network-wire = "=0.0.2"` under
   `[dependencies]`, then run `cargo check`.
 - Every crate page on crates.io shows "Builds on docs.rs" once the docs
   build finishes.

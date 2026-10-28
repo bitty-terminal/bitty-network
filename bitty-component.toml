@@ -1,6 +1,6 @@
 [component]
 name = "net"
-version = "0.0.1"
+version = "0.0.2"
 protocol = [1, 1]
 executable = "bitty-net"
 # Packaging replaces this parser-valid sentinel with the target binary digest.

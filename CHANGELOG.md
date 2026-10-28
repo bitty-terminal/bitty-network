@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Feature** (CTX-0076, bitty#2491): per-platform `net` component release
+  matrix. `component-targets.toml` is the single source of truth for the five
+  supported host triples (Linux glibc x86_64/aarch64, macOS arm64/x86_64,
+  Windows x86_64) and the two documented exclusions;
+  `scripts/component-release.sh` gains `check`, `targets`, `manifest`,
+  `catalog`, `record`, and `verify --record`. Every native CI and release leg
+  packs the target tarball, unpacks it, runs the packaged protocol smoke
+  (`Hello`/`HelloAck`, a grant-refused `HttpRequest`, and a clean `Shutdown`
+  exit), and only then uploads the artifact. The release writes
+  `release/component-digests.toml` with one tarball/executable digest row per
+  supported target; `verify --record` requires an exact match.
 - **Feature** (CTX-0075): `bitty-network-publication` crate — Core-side
   launch-scoped mutual-certificate provider-publication control transport.
   Generates fresh ECDSA P-256 `core-supervisor`/`ai-helper` leaves per launch,
@@ -39,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Security** (CTX-0076): refreshed `rustls-webpki` 0.103.16,
+  `webpki-root-certs` 1.0.10, and `tokio` 1.53.3 for RUSTSEC-2026-0382,
+  RUSTSEC-2026-0383, and RUSTSEC-2026-0386. `deny.toml` records the
+  `windows-sys` 0.52/0.61 split that `ring`'s `^0.52` pin still forces next to
+  `mio`'s 0.61 requirement.
+- **Changed** (CTX-0076): the `net` component version moves to `0.0.2` in
+  `bitty-component.toml` and the workspace `Cargo.toml`. Component artifacts
+  are immutable per version, and `0.0.1` was already published with a
+  Linux-only payload.
 - **Refactor**: Extracted TLS trust and client-identity provider into new
   `bitty-network-tls` crate (`#56`, phase 3/7 of crate split). Moved `tls` module
   from `bitty-network` to `bitty-network-tls` (~2433 lines: lib.rs, provider.rs,

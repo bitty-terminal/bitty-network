@@ -270,6 +270,13 @@ jobs:
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          # The action runs inside an Alpine musl container whose rustup also
+          # honors rust-toolchain.toml. Without this input the container first
+          # reports "override toolchain 1.98.1-x86_64-unknown-linux-musl is not
+          # installed" and only then self-installs it; pinning the same channel
+          # here installs the toolchain the workspace asks for up front.
+          rust-version: ${{ steps.rust-channel.outputs.channel }}
         # NOTE: do NOT pass `arguments: check` — the action's `command`
         # input already defaults to `check`, and passing both yields
         # `check check` (invalid value for [WHICH], red supply-chain gate).
@@ -280,6 +287,170 @@ jobs:
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit advisories
         run: cargo audit --ignore RUSTSEC-2026-0009
+
+  component-targets:
+    name: Component release matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate descriptor, release matrix, and supported-target gate
+        run: |
+          set -euo pipefail
+          scripts/component-release.sh check
+          name="$(awk -F'"' '$1 ~ /^[[:space:]]*name[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
+          version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
+          while IFS= read -r target; do
+            expected="https://cdn.bitty.run/extensions/${name}/${version}/${target}.tar.gz"
+            mapping="$(scripts/package-component.sh --print-url --version "$version" --target "$target")"
+            actual="${mapping%%$'\n'*}"
+            test "$actual" = "$expected" || {
+              echo "URL mapping drifted for $target: $actual" >&2
+              exit 1
+            }
+          done < <(scripts/component-release.sh targets)
+      - name: Emit GitHub Actions matrix
+        id: matrix
+        run: |
+          set -euo pipefail
+          matrix="$(scripts/component-release.sh targets --format json)"
+          printf 'matrix=%s\n' "$matrix" >>"$GITHUB_OUTPUT"
+
+  component:
+    name: Component ${{ matrix.target }}
+    needs: component-targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.component-targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve Rust channel (rust-toolchain.toml)
+        id: rust-channel
+        shell: bash
+        run: |
+          channel="$(scripts/rust-channel.sh)"
+          echo "channel=$channel" >>"$GITHUB_OUTPUT"
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ steps.rust-channel.outputs.channel }}
+          components: clippy
+      - name: Native compile evidence
+        run: cargo check --workspace --all-targets --locked
+      - name: Native component test evidence
+        run: cargo test -p bitty-net --locked
+      - name: Clippy on the native component (deny warnings)
+        run: cargo clippy -p bitty-net --all-targets --locked -- -D warnings
+      - name: Build and pack the target tarball
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
+          binary="target/$TARGET/release/bitty-net"
+          case "$TARGET" in
+          *-windows-*) binary="$binary.exe" ;;
+          esac
+          cargo build --release --locked -p bitty-net --target "$TARGET"
+          scripts/package-component.sh \
+            --version "$version" \
+            --target "$TARGET" \
+            --binary "$binary" \
+            --output "dist/$TARGET.tar.gz"
+      - name: Protocol smoke against the packed executable
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Git Bash expands $RUNNER_TEMP to a drive-letter path that tar reads
+          # as literal backslashes; native Python needs a Windows path for
+          # --binary. Convert the stage with cygpath -u and the executable
+          # back with cygpath -w.
+          stage="${RUNNER_TEMP}/net-component"
+          if command -v cygpath >/dev/null 2>&1; then
+            stage="$(cygpath -u "$RUNNER_TEMP")/net-component"
+          fi
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          tar -xzf "dist/$TARGET.tar.gz" -C "$stage"
+          binary="$stage/bitty-net"
+          case "$TARGET" in
+          *-windows-*) binary="$binary.exe" ;;
+          esac
+          chmod 755 "$binary" 2>/dev/null || true
+          smoke_binary="$binary"
+          if command -v cygpath >/dev/null 2>&1; then
+            smoke_binary="$(cygpath -w "$binary")"
+          fi
+          scripts/component-release.sh smoke --binary "$smoke_binary" --timeout 30
+      - name: Emit the catalog row for this target
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/component-release.sh catalog --dist dist --output "catalog/$TARGET.catalog.v1"
+          rows="$(grep -c '^extension ' "catalog/$TARGET.catalog.v1")"
+          test "$rows" = "1" || {
+            echo "expected exactly one catalog row, found $rows" >&2
+            exit 1
+          }
+          grep -F " $TARGET " "catalog/$TARGET.catalog.v1"
+      - name: Upload the verified target package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: net-component-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  component-aggregate:
+    name: Component aggregate manifest and catalog
+    needs: component
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download every verified target package
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: net-component-*
+          merge-multiple: true
+          path: dist
+      - name: Regenerate the aggregate SHA256SUMS
+        run: scripts/component-release.sh manifest --dist dist
+      - name: Emit the per-target digest record
+        run: scripts/component-release.sh record --dist dist --output release/component-digests.toml
+      - name: Verify the complete supported matrix, descriptor chain, and digest record
+        run: |
+          scripts/component-release.sh verify \
+            --dist dist \
+            --record release/component-digests.toml
+      - name: Emit the catalog.v1 row fragment
+        run: scripts/component-release.sh catalog --dist dist --output catalog/catalog.v1
+      - name: Show the verified catalog fragment and digest record
+        run: |
+          cat catalog/catalog.v1
+          cat release/component-digests.toml
+      - name: Upload the verified release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: net-component-package
+          path: |
+            dist/
+            catalog/
+            release/
+          retention-days: 1
+          if-no-files-found: error
 
   actionlint:
     name: Lint GitHub Actions workflows
