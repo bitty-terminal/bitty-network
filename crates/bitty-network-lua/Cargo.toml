@@ -14,8 +14,8 @@ publish = true
 workspace = true
 
 [dependencies]
-bitty-network-api = { path = "../bitty-network-api", version = "0.0.1" }
-bitty-network = { path = "../bitty-network", version = "0.0.1", features = ["http"] }
+bitty-network-api = { path = "../bitty-network-api", version = "0.0.2" }
+bitty-network = { path = "../bitty-network", version = "0.0.2", features = ["http"] }
 
 # Phodopus - Bitty's pure-Rust stackless Lua VM
 # Pinned to same revision as bitty/crates/bitty-lua

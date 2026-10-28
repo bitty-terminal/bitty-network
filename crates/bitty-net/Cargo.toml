@@ -22,8 +22,8 @@ name = "bitty-net"
 path = "src/main.rs"
 
 [dependencies]
-bitty-network-api = { path = "../bitty-network-api", version = "0.0.1" }
-bitty-network-wire = { path = "../bitty-network-wire", version = "0.0.1" }
+bitty-network-api = { path = "../bitty-network-api", version = "0.0.2" }
+bitty-network-wire = { path = "../bitty-network-wire", version = "0.0.2" }
 # Real HTTP transport. The `proxy` feature stays off: the component reads no
 # proxy variable itself unless a build opts in explicitly.
-bitty-network = { path = "../bitty-network", version = "0.0.1", features = ["http"] }
+bitty-network = { path = "../bitty-network", version = "0.0.2", features = ["http"] }
