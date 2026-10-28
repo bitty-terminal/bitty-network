@@ -112,10 +112,44 @@ end)
 
 See `docs/lua-integration/design.md` for the complete Lua API design.
 
+## Native component release
+
+`bitty-net` also ships as the per-platform `net` extension component.
+
+- Descriptor: [bitty-component.toml](bitty-component.toml) is the canonical
+  record of the fixed fields (`name`, `version`, `protocol = [1, 1]`,
+  `executable`). Its all-zero `sha256` is the packaging sentinel; the packer
+  renders the per-target digest and install-time verification refuses a
+  descriptor whose digest does not match the executable.
+- Matrix: [component-targets.toml](component-targets.toml) declares the five
+  supported host triples (Linux glibc x86_64/aarch64, macOS arm64/x86_64,
+  Windows x86_64) plus the documented exclusions (musl, Windows arm64). Each
+  supported triple is built, tested, packed, and smoke-run on its own native
+  runner; see [docs/component-release-matrix.md](docs/component-release-matrix.md)
+  for the evidence table and the dependency reasons behind each exclusion.
+- Pack: `scripts/package-component.sh --version X.Y.Z --target <triple> --binary <path> --output dist/<triple>.tar.gz` writes the tarball, its `.sha256` sidecar, and the aggregate `SHA256SUMS`.
+- Smoke: `scripts/component-release.sh smoke --binary <unpacked/bitty-net>`
+  verifies `--version`, `Hello`/`HelloAck`, a grant-refused `HttpRequest`
+  answered with `Error { kind: offline }`, and a clean `Shutdown` exit without
+  any network egress. Every native CI and release leg runs it against the
+  extracted tarball before uploading the artifact.
+- Digest record: `scripts/component-release.sh record --dist dist --output release/component-digests.toml` writes one tarball/executable digest row per supported target; `verify --record` requires an exact match with the verified artifacts.
+- CI: the `component-targets`, `component`, and `component-aggregate` jobs in
+  [ci.yml](.github/workflows/ci.yml) validate the matrix, then check, test,
+  clippy, pack, smoke, and emit the catalog row per target, and finally verify
+  the full matrix, `SHA256SUMS`, and the digest record.
+  [component-release.yml](.github/workflows/component-release.yml) is the only
+  tag publisher and repeats the per-target proof before publishing payloads
+  (tarballs, sidecars, `SHA256SUMS`) under `extensions/net/<version>/`. The
+  catalog fragment and digest record are generated and verified but not
+  uploaded: `extensions/catalog.v1` is shared across components.
+
 ## Documentation
 
 - [Architecture Overview](docs/architecture/crate-structure.md)
 - [Lua Integration Design](docs/lua-integration/design.md)
+- [Native Component Distribution](docs/component-distribution.md)
+- [Component Release Matrix](docs/component-release-matrix.md)
 - API Documentation: `cargo doc --workspace --no-deps --open`
 
 ## Layout
@@ -125,4 +159,7 @@ See `docs/lua-integration/design.md` for the complete Lua API design.
 
 ## Gates
 
-`just check` (fmt + clippy `-D warnings` + test). Rust channel pinned in `rust-toolchain.toml`; MSRV 1.85 (`rust-version` in the workspace root).
+`just check` (fmt, clippy `-D warnings`, workspace tests, package/publish
+fixtures, release-matrix gate and fixtures, packaged protocol smoke fixtures).
+Rust channel pinned in `rust-toolchain.toml`; MSRV 1.85 (`rust-version` in the
+workspace root).

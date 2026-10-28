@@ -294,10 +294,12 @@ jobs:
         run: |
           set -euo pipefail
           scripts/component-release.sh check
+          name="$(awk -F'"' '$1 ~ /^[[:space:]]*name[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
           version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
           while IFS= read -r target; do
-            expected="https://cdn.bitty.run/extensions/net/${version}/${target}.tar.gz"
-            actual="$(scripts/package-component.sh --print-url --version "$version" --target "$target" | head -n 1)"
+            expected="https://cdn.bitty.run/extensions/${name}/${version}/${target}.tar.gz"
+            mapping="$(scripts/package-component.sh --print-url --version "$version" --target "$target")"
+            actual="${mapping%%$'\n'*}"
             test "$actual" = "$expected" || {
               echo "URL mapping drifted for $target: $actual" >&2
               exit 1
@@ -357,22 +359,33 @@ jobs:
             --target "$TARGET" \
             --binary "$binary" \
             --output "dist/$TARGET.tar.gz"
-      - name: Run the packaged binary on the native host
+      - name: Protocol smoke against the packed executable
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           set -euo pipefail
-          version="$(awk -F'"' '$1 ~ /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' bitty-component.toml)"
-          binary="target/$TARGET/release/bitty-net"
+          # Git Bash expands $RUNNER_TEMP to a drive-letter path that tar reads
+          # as literal backslashes; native Python needs a Windows path for
+          # --binary. Convert the stage with cygpath -u and the executable
+          # back with cygpath -w.
+          stage="${RUNNER_TEMP}/net-component"
+          if command -v cygpath >/dev/null 2>&1; then
+            stage="$(cygpath -u "$RUNNER_TEMP")/net-component"
+          fi
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          tar -xzf "dist/$TARGET.tar.gz" -C "$stage"
+          binary="$stage/bitty-net"
           case "$TARGET" in
           *-windows-*) binary="$binary.exe" ;;
           esac
-          output="$("$binary" --version)"
-          test "$output" = "bitty-net $version" || {
-            echo "unexpected --version output: $output" >&2
-            exit 1
-          }
+          chmod 755 "$binary" 2>/dev/null || true
+          smoke_binary="$binary"
+          if command -v cygpath >/dev/null 2>&1; then
+            smoke_binary="$(cygpath -w "$binary")"
+          fi
+          scripts/component-release.sh smoke --binary "$smoke_binary" --timeout 30
       - name: Emit the catalog row for this target
         env:
           TARGET: ${{ matrix.target }}
@@ -410,12 +423,19 @@ jobs:
           path: dist
       - name: Regenerate the aggregate SHA256SUMS
         run: scripts/component-release.sh manifest --dist dist
-      - name: Verify the complete supported matrix and descriptor chain
-        run: scripts/component-release.sh verify --dist dist
+      - name: Emit the per-target digest record
+        run: scripts/component-release.sh record --dist dist --output release/component-digests.toml
+      - name: Verify the complete supported matrix, descriptor chain, and digest record
+        run: |
+          scripts/component-release.sh verify \
+            --dist dist \
+            --record release/component-digests.toml
       - name: Emit the catalog.v1 row fragment
         run: scripts/component-release.sh catalog --dist dist --output catalog/catalog.v1
-      - name: Show the verified catalog fragment
-        run: cat catalog/catalog.v1
+      - name: Show the verified catalog fragment and digest record
+        run: |
+          cat catalog/catalog.v1
+          cat release/component-digests.toml
       - name: Upload the verified release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -423,6 +443,7 @@ jobs:
           path: |
             dist/
             catalog/
+            release/
           retention-days: 1
           if-no-files-found: error
 

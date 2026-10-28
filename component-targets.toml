@@ -14,6 +14,11 @@
 # The gate `scripts/component-release.sh check` fails when no target is
 # supported, when a supported target lacks a runner, when an unsupported
 # target lacks a reason, or when a triple is duplicated or unknown.
+#
+# This matrix deliberately carries no digests: it is the input, not the
+# release output. `scripts/component-release.sh record` writes the per-target
+# tarball/executable digests to release/component-digests.toml after the
+# artifacts are verified, and `verify --record` requires an exact match.
 
 schema = 1
 
@@ -62,21 +67,28 @@ supported = true
 # hosts, but this repository publishes no bytes for them. They must stay out
 # of the manifest and the catalog instead of shipping unverified artifacts.
 
-# Alpine/musl x86_64 hosts request the musl triple. The component links
-# against glibc; a static musl build (including the HTTP backend's C
-# dependency) needs its own toolchain proof and is out of the 0.0.27 scope.
+# Alpine/musl x86_64 hosts request the musl triple. The shipped graph is not
+# pure Rust: `bitty-network-tls` enables rustls' `aws-lc-rs` provider, so
+# `aws-lc-sys` compiles C/assembly through cmake, and `rustls-platform-verifier`
+# reads the platform trust store (openssl-probe) at runtime. A musl artifact
+# therefore needs a static Alpine toolchain build plus a native musl run that
+# proves both the crypto assembly and the trust-store lookup; today's
+# `x86_64-unknown-linux-gnu` artifact is the only one with that proof.
 [[target]]
 triple = "x86_64-unknown-linux-musl"
 os = "linux"
 arch = "x86_64"
 supported = false
-reason = "glibc-only build; Alpine/musl hosts request a static musl artifact that is deferred until a dedicated build-and-test proof lands"
+reason = "not a pure-Rust graph (aws-lc-sys C/asm plus platform trust-store lookup); a static musl artifact needs its own Alpine toolchain build and native run before any bytes are published"
 
-# Windows arm64 hosts request this triple. 0.0.27 publishes Windows x86_64
-# only; a Windows arm64 runner and ABI proof are follow-ups.
+# Windows arm64 hosts request this triple. `aws-lc-sys` needs a clang/LLVM plus
+# cmake assembler path for its Windows ARM64 crypto code, and the MSVC arm64
+# CRT and `rustls-platform-verifier` Windows arm64 backend are separate ABI
+# targets. This repository has no native arm64 Windows runner (only the
+# x86_64 `windows-2025` leg is proven), so no arm64 bytes are published.
 [[target]]
 triple = "aarch64-pc-windows-msvc"
 os = "windows"
 arch = "aarch64"
 supported = false
-reason = "out of the 0.0.27 scope; needs a Windows arm64 native runner and ABI proof before any artifact is published"
+reason = "no native arm64 Windows runner in this repository; aws-lc-sys needs a clang/cmake ARM64 assembler path and the MSVC arm64 ABI is unproven here"

@@ -21,9 +21,14 @@ Subcommands:
               ``SHA256SUMS`` over the target tarballs in a dist directory.
 ``catalog``   Emit the ``extensions/catalog.v1`` row fragment for the
               verified tarballs in a dist directory, keyed by target.
+``record``    Write the release digest record: one row per supported target
+              with the tarball and executable SHA-256 values the release
+              produced. The canonical root descriptor keeps its placeholder
+              sentinel; each archive carries that target's real digest.
 ``verify``    Require the dist directory to hold exactly the supported
               target set and verify the descriptor/digest chain inside every
               archive. Nothing unpublished or unverified can pass this gate.
+              With ``--record`` the generated digest record must match too.
 
 Only supported targets ever produce a manifest entry or a catalog row. An
 unsupported target in the matrix is documentation, never a publishable row.
@@ -53,6 +58,7 @@ MATRIX_FILE = "component-targets.toml"
 MANIFEST_FILE = "SHA256SUMS"
 CATALOG_FILE = "catalog.v1"
 CATALOG_SCHEMA_LINE = "schema 1"
+RECORD_SCHEMA = 1
 EXECUTABLE_PREFIX = "bitty-"
 
 DESCRIPTOR_MAX_BYTES = 4096
@@ -82,6 +88,32 @@ HOST_TARGETS: dict[str, tuple[str, str]] = {
 DESCRIPTOR_KEYS = {"name", "version", "protocol", "executable", "sha256"}
 MATRIX_KEYS = {"schema", "target"}
 TARGET_ROW_KEYS = {"triple", "os", "arch", "runner", "supported", "reason"}
+RECORD_KEYS = {"schema", "name", "version", "protocol", "target"}
+RECORD_TARGET_KEYS = {
+    "triple",
+    "tarball",
+    "tarball_sha256",
+    "executable",
+    "executable_sha256",
+}
+
+# First bytes of a native executable for each supported OS. A tarball named
+# for a target must not carry another platform's payload (for example a PE
+# file in a Linux artifact); the magic is checked before anything is
+# published. Mach-O covers both thin (32/64-bit, either endianness) and fat
+# containers because a macOS runner may emit any of them.
+EXECUTABLE_MAGIC = {
+    "linux": (b"\x7fELF",),
+    "macos": (
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+    ),
+    "windows": (b"MZ",),
+}
 
 
 class GateError(Exception):
@@ -121,6 +153,19 @@ class Component:
     version: str
     executable: str
     sha256: str
+    protocol_min: int
+    protocol_max: int
+
+
+@dataclass(frozen=True)
+class ArchiveInfo:
+    """Verified facts about one target tarball."""
+
+    tarball_sha256: str
+    executable: str
+    executable_sha256: str
+    executable_size: int
+    executable_mode: int
 
 
 def fail(message: str) -> NoReturn:
@@ -195,15 +240,28 @@ def validate_component_data(data: dict, label: str) -> Component:
     if not isinstance(sha256, str) or not DIGEST_RE.match(sha256):
         fail(f"{label} sha256 must be 64 lowercase hex characters")
 
-    return Component(name=name, version=version, executable=executable, sha256=sha256)
+    return Component(
+        name=name,
+        version=version,
+        executable=executable,
+        sha256=sha256,
+        protocol_min=protocol_min,
+        protocol_max=protocol_max,
+    )
 
 
 def cargo_version(root: Path) -> str:
     path = root / "Cargo.toml"
     data = read_toml(path, "Cargo.toml")
     package = data.get("package")
-    if isinstance(package, dict) and "version" in package:
-        return strict_version(package["version"], "Cargo.toml [package] version")
+    if isinstance(package, dict):
+        version = package.get("version")
+        # `version.workspace = true` inherits [workspace.package].version;
+        # let the workspace lookup below resolve it instead of handing the
+        # TOML table to strict_version.
+        inherited = isinstance(version, dict) and version.get("workspace") is True
+        if version is not None and not inherited:
+            return strict_version(version, "Cargo.toml [package] version")
     workspace = data.get("workspace")
     if isinstance(workspace, dict):
         workspace_package = workspace.get("package")
@@ -325,20 +383,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_stream(handle, limit: int, label: str) -> tuple[str, int]:
+def sha256_stream(handle, limit: int, label: str) -> tuple[str, int, bytes]:
     digest = hashlib.sha256()
     size = 0
+    prefix = bytearray()
     for chunk in iter(lambda: handle.read(1024 * 1024), b""):
         size += len(chunk)
         if size > limit:
             fail(f"{label} exceeds {limit} bytes")
         digest.update(chunk)
-    return digest.hexdigest(), size
+        if len(prefix) < 8:
+            prefix.extend(chunk[: 8 - len(prefix)])
+    return digest.hexdigest(), size, bytes(prefix)
 
 
-def inspect_archive(path: Path, component: Component, target: str) -> str:
-    """Verify one tarball's members, descriptor, and executable digest."""
-    expected_executable = archive_executable(component, target)
+def inspect_archive(path: Path, component: Component, target: Target) -> ArchiveInfo:
+    """Verify one tarball's members, descriptor, digest, and executable shape."""
+    expected_executable = archive_executable(component, target.triple)
     expected_members = sorted([DESCRIPTOR_FILE, expected_executable])
     try:
         with tarfile.open(path, mode="r:gz") as archive:
@@ -378,12 +439,21 @@ def inspect_archive(path: Path, component: Component, target: str) -> str:
                     f"{path} descriptor executable {embedded.executable} differs from "
                     f"{component.executable}"
                 )
+            if (embedded.protocol_min, embedded.protocol_max) != (
+                component.protocol_min,
+                component.protocol_max,
+            ):
+                fail(
+                    f"{path} descriptor protocol "
+                    f"[{embedded.protocol_min}, {embedded.protocol_max}] differs from "
+                    f"the canonical [{component.protocol_min}, {component.protocol_max}]"
+                )
 
             executable_member = archive.getmember(expected_executable)
             executable_handle = archive.extractfile(executable_member)
             if executable_handle is None:
                 fail(f"{path} executable {expected_executable} is not readable")
-            digest, size = sha256_stream(
+            digest, size, prefix = sha256_stream(
                 executable_handle, EXECUTABLE_MAX_BYTES, f"{path} executable"
             )
             if size == 0:
@@ -393,9 +463,27 @@ def inspect_archive(path: Path, component: Component, target: str) -> str:
                     f"{path} descriptor sha256 {embedded.sha256} does not match the "
                     f"executable digest {digest}"
                 )
+            expected_magic = EXECUTABLE_MAGIC.get(target.os)
+            if expected_magic is None:
+                fail(f"{path} target {target.triple} has no executable magic rule")
+            if not any(prefix.startswith(magic) for magic in expected_magic):
+                fail(
+                    f"{path} executable {expected_executable} does not look like a "
+                    f"{target.os} executable (first bytes {prefix.hex()})"
+                )
+            if target.os != "windows" and executable_member.mode & 0o111 == 0:
+                fail(
+                    f"{path} executable {expected_executable} is not marked executable"
+                )
     except (OSError, tarfile.TarError) as error:
         fail(f"cannot read component archive {path}: {error}")
-    return sha256_file(path)
+    return ArchiveInfo(
+        tarball_sha256=sha256_file(path),
+        executable=expected_executable,
+        executable_sha256=digest,
+        executable_size=size,
+        executable_mode=executable_member.mode,
+    )
 
 
 def dist_entries(dist: Path) -> list[Path]:
@@ -495,6 +583,8 @@ def verify_dist(
                 + ", ".join(missing)
             )
 
+    target_rows = {target.triple: target for target in matrix.targets}
+    infos: dict[str, ArchiveInfo] = {}
     for target, tarball in tarballs.items():
         digest = sha256_file(tarball)
         if digests[target] != digest:
@@ -507,9 +597,10 @@ def verify_dist(
             fail(f"sidecar is missing: {sidecar}")
         if sidecar.read_text(encoding="utf-8") != f"{digest}  {tarball.name}\n":
             fail(f"sidecar does not match {tarball.name}: {sidecar.name}")
-        embedded_digest = inspect_archive(tarball, component, target)
-        if embedded_digest != digest:
+        info = inspect_archive(tarball, component, target_rows[target])
+        if info.tarball_sha256 != digest:
             fail(f"archive digest changed while verifying {tarball}")
+        infos[target] = info
 
     sidecars = {
         entry.name[: -len(".sha256")]
@@ -523,7 +614,12 @@ def verify_dist(
             f"expected {sorted(expected_sidecars)}, found {sorted(sidecars)}"
         )
 
-    return component, {"matrix": matrix, "tarballs": tarballs, "digests": digests}
+    return component, {
+        "matrix": matrix,
+        "tarballs": tarballs,
+        "digests": digests,
+        "infos": infos,
+    }
 
 
 def rows(component: Component, digests: dict[str, str]) -> list[str]:
@@ -531,6 +627,123 @@ def rows(component: Component, digests: dict[str, str]) -> list[str]:
         f"extension {component.name} {component.version} {target} {digests[target]}"
         for target in sorted(digests)
     ]
+
+
+def render_record(
+    component: Component, matrix: Matrix, infos: dict[str, ArchiveInfo]
+) -> str:
+    """Render the release digest record as deterministic TOML.
+
+    The canonical root descriptor keeps its zero placeholder; this record is
+    the release output that names each target's real tarball and executable
+    digests. It is written outside ``dist`` so it can never be mistaken for a
+    publishable R2 object.
+    """
+    lines = [
+        "# Generated by scripts/component-release.sh record. Do not edit by hand.",
+        "# The canonical bitty-component.toml keeps the zero-digest placeholder;",
+        "# each archive's embedded descriptor carries that target's real digest.",
+        f"schema = {RECORD_SCHEMA}",
+        f'name = "{component.name}"',
+        f'version = "{component.version}"',
+        f"protocol = [{component.protocol_min}, {component.protocol_max}]",
+    ]
+    for target in matrix.supported:
+        info = infos[target.triple]
+        lines.extend(
+            [
+                "",
+                "[[target]]",
+                f'triple = "{target.triple}"',
+                f'tarball = "{target.triple}.tar.gz"',
+                f'tarball_sha256 = "{info.tarball_sha256}"',
+                f'executable = "{info.executable}"',
+                f'executable_sha256 = "{info.executable_sha256}"',
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def verify_record(
+    path: Path,
+    component: Component,
+    matrix: Matrix,
+    infos: dict[str, ArchiveInfo],
+) -> None:
+    """Require a generated record to match the verified dist byte-for-byte."""
+    if path.is_symlink() or not path.is_file():
+        fail(f"release digest record is missing or not a regular file: {path}")
+    data = read_toml(path, "release digest record")
+    extra = sorted(set(data) - RECORD_KEYS)
+    if extra:
+        fail(f"release digest record has unknown keys: {', '.join(extra)}")
+    if data.get("schema") != RECORD_SCHEMA:
+        fail(
+            f"release digest record schema must be {RECORD_SCHEMA}, "
+            f"got: {data.get('schema')!r}"
+        )
+    if data.get("name") != component.name:
+        fail(
+            f"release digest record name {data.get('name')!r} differs from "
+            f"{component.name!r}"
+        )
+    if data.get("version") != component.version:
+        fail(
+            f"release digest record version {data.get('version')!r} differs from "
+            f"{component.version!r}"
+        )
+    if data.get("protocol") != [component.protocol_min, component.protocol_max]:
+        fail(
+            "release digest record protocol differs from the descriptor: "
+            f"{data.get('protocol')!r}"
+        )
+    rows_data = data.get("target")
+    if not isinstance(rows_data, list) or not rows_data:
+        fail("release digest record must define at least one [[target]] row")
+
+    seen: set[str] = set()
+    for index, row in enumerate(rows_data):
+        label = f"release digest record target[{index}]"
+        if not isinstance(row, dict):
+            fail(f"{label} must be a table")
+        unknown = sorted(set(row) - RECORD_TARGET_KEYS)
+        if unknown:
+            fail(f"{label} has unknown keys: {', '.join(unknown)}")
+        missing = sorted(RECORD_TARGET_KEYS - set(row))
+        if missing:
+            fail(f"{label} is missing keys: {', '.join(missing)}")
+        triple = row["triple"]
+        if not isinstance(triple, str) or triple not in infos:
+            fail(f"{label} triple {triple!r} is not a supported packaged target")
+        if triple in seen:
+            fail(f"{label} duplicates triple {triple}")
+        seen.add(triple)
+        info = infos[triple]
+        expected = {
+            "tarball": f"{triple}.tar.gz",
+            "tarball_sha256": info.tarball_sha256,
+            "executable": info.executable,
+            "executable_sha256": info.executable_sha256,
+        }
+        for key, value in expected.items():
+            if row[key] != value:
+                fail(
+                    f"{label} {triple} {key} {row[key]!r} differs from the "
+                    f"verified artifact {value!r}"
+                )
+    expected_targets = {target.triple for target in matrix.supported}
+    if seen != expected_targets:
+        missing = sorted(expected_targets - seen)
+        extra = sorted(seen - expected_targets)
+        detail = []
+        if missing:
+            detail.append(f"missing targets: {', '.join(missing)}")
+        if extra:
+            detail.append(f"unexpected targets: {', '.join(extra)}")
+        fail(
+            "release digest record does not cover the supported matrix: "
+            + "; ".join(detail)
+        )
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -603,11 +816,36 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_record(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    component, matrix = load_repo(root)
+    dist = Path(args.dist).resolve()
+    output = Path(args.output).resolve()
+    if output == dist or dist in output.parents:
+        fail("release digest record must be written outside --dist")
+    _, verified = verify_dist(dist, root, require_full_matrix=True)
+    document = render_record(component, matrix, verified["infos"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(document, encoding="utf-8")
+    print(
+        f"component-release: PASS (record: {component.name} {component.version}; "
+        f"{len(matrix.supported)} target(s) -> {output})"
+    )
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     component, matrix = load_repo(root)
     dist = Path(args.dist).resolve()
-    verify_dist(dist, root, require_full_matrix=True)
+    _, verified = verify_dist(dist, root, require_full_matrix=True)
+    if args.record:
+        verify_record(
+            Path(args.record).resolve(),
+            component,
+            matrix,
+            verified["infos"],
+        )
     print(
         f"component-release: PASS (verify: {component.name} {component.version}; "
         f"{len(matrix.supported)} supported target(s))"
@@ -655,11 +893,25 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.add_argument("--output", help="write the fragment here (default: stdout)")
     catalog.set_defaults(func=cmd_catalog)
 
+    record = subparsers.add_parser(
+        "record", help="write the per-target release digest record"
+    )
+    add_root(record)
+    record.add_argument("--dist", required=True, help="packaged dist directory")
+    record.add_argument(
+        "--output", required=True, help="record path outside the dist directory"
+    )
+    record.set_defaults(func=cmd_record)
+
     verify = subparsers.add_parser(
         "verify", help="require the full supported matrix and verify every archive"
     )
     add_root(verify)
     verify.add_argument("--dist", required=True, help="packaged dist directory")
+    verify.add_argument(
+        "--record",
+        help="release digest record that must match the verified artifacts",
+    )
     verify.set_defaults(func=cmd_verify)
 
     return parser
