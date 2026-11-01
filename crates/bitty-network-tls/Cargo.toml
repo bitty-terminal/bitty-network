@@ -22,7 +22,7 @@ rustls = { version = "=0.23.46", default-features = false, features = ["std", "a
 rustls-platform-verifier = { version = "=0.7.1", default-features = false }
 rustls-pki-types = { version = "=1.15.1", default-features = false, features = ["std"] }
 idna = { version = "=1.1.0" }
-zeroize = { version = "=1.9.0", features = ["alloc"] }
+zeroize = { version = "=1.9.1", features = ["alloc"] }
 # Lock ICU/zerotrie transitive dependencies to versions compatible with Rust 1.85.
 # idna -> idna_adapter -> icu_* -> zerotrie/zerovec/yoke/potential_utf. Newer versions
 # require yoke ^0.8.3 which has yoke-derive 0.8.3 compilation errors on Rust 1.85.
@@ -40,11 +40,11 @@ potential_utf = { workspace = true }
 # avoids pulling a second crypto provider into the test build.
 # Pinned to 0.13.x: rcgen 0.14+ requires rustc 1.88 and reworks the signing API
 # around Issuer, above this repo's MSRV 1.85. Revisit on MSRV rise.
-rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 # `OffsetDateTime` is the type of a generated certificate's validity window.
 # Already in the graph through rcgen; a dev-dependency so the test-only
 # certificates can name an explicit, fixed window instead of "around now".
 # Pinned to 0.3.41 (last version compatible with MSRV 1.85). RUSTSEC-2026-0009
 # affects this version but is in the unreachable RFC 2822 parser, and the fix
 # needs rustc 1.88. Documented in deny.toml as a dev-dependency exception.
-time = { version = "=0.3.41", default-features = false, features = ["std"] }
+time = { version = "=0.3.55", default-features = false, features = ["std"] }
