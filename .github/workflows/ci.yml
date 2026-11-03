@@ -42,12 +42,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: rustfmt, clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - run: just check
@@ -68,12 +68,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: rustfmt, clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - run: just check-http
@@ -94,12 +94,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: rustfmt, clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - run: just check-websocket
@@ -112,13 +112,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install MSRV toolchain 1.85
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           # MSRV floor; must match the rust-version in Cargo.toml.
           toolchain: 1.85
           components: clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-1.85
       # Deny rustc warnings so new warnings fail CI going forward.
@@ -141,12 +141,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - name: Check workspace compilation (Linux)
@@ -172,12 +172,12 @@ jobs:
         # command substitution above parses. No-op on Linux/macOS.
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - name: Check workspace compilation (Windows)
@@ -201,12 +201,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - name: Check workspace compilation (macOS ARM64)
@@ -238,12 +238,12 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: clippy
       - name: Cache Rust compilation artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust-${{ runner.os }}-${{ steps.rust-channel.outputs.channel }}
       - name: Check single-feature compilation (${{ matrix.features }})
@@ -266,7 +266,7 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -337,7 +337,7 @@ jobs:
           channel="$(scripts/rust-channel.sh)"
           echo "channel=$channel" >>"$GITHUB_OUTPUT"
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.rust-channel.outputs.channel }}
           components: clippy
@@ -405,7 +405,7 @@ jobs:
           }
           grep -F " $TARGET " "catalog/$TARGET.catalog.v1"
       - name: Upload the verified target package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: net-component-${{ matrix.target }}
           path: dist/
@@ -421,7 +421,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download every verified target package
-        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: net-component-*
           merge-multiple: true
@@ -442,7 +442,7 @@ jobs:
           cat catalog/catalog.v1
           cat release/component-digests.toml
       - name: Upload the verified release candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: net-component-package
           path: |
