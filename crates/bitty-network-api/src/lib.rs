@@ -1088,32 +1088,59 @@ fn normalize_domain(domain: impl AsRef<str>) -> String {
     domain.as_ref().trim().trim_end_matches('.').to_lowercase()
 }
 
+fn parse_port_digits(text: &str) -> Option<u16> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u16>().ok().filter(|&port| port != 0)
+}
+
 /// Best-effort port extraction over the URL vocabulary (no parsing
 /// dependencies): explicit authority port when parseable, else the scheme
 /// default (`443` for `https`/`wss`, `80` for `http`/`ws`), else `None`.
 /// IPv6 brackets are honored; userinfo is stripped before the split.
 fn url_port(url: &str) -> Option<u16> {
     let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "https" | "wss" => 443,
+        "http" | "ws" => 80,
+        _ => return None,
+    };
     let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     let hostport = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
     };
+    if hostport.is_empty() {
+        return None;
+    }
     let explicit = if let Some(stripped) = hostport.strip_prefix('[') {
-        match stripped.split_once(']') {
-            Some((_, tail)) => tail.strip_prefix(':'),
-            None => None,
+        let (host, tail) = stripped.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        if tail.is_empty() {
+            None
+        } else {
+            Some(tail.strip_prefix(':')?)
         }
     } else {
-        hostport.split_once(':').map(|(_, port)| port)
+        if hostport.contains('[') || hostport.contains(']') {
+            return None;
+        }
+        match hostport.split_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() {
+                    return None;
+                }
+                Some(port)
+            }
+            None => None,
+        }
     };
     match explicit {
-        Some(text) => text.parse::<u16>().ok(),
-        None => match scheme.to_lowercase().as_str() {
-            "https" | "wss" => Some(443),
-            "http" | "ws" => Some(80),
-            _ => None,
-        },
+        Some(text) => parse_port_digits(text),
+        None => Some(default_port),
     }
 }
 
@@ -1697,5 +1724,16 @@ mod tests {
         // survive trimming, i.e. ones in the interior.
         assert!(is_exact_identity_host("Example.COM."));
         assert!(is_exact_identity_host("\texample.com\n"));
+    }
+
+    #[test]
+    fn url_port_rejects_unknown_scheme_with_explicit_port_and_invalid_ports() {
+        assert_eq!(Request::get("ftp://example.com:80/").port(), None);
+        assert_eq!(Request::get("http://example.com:0/").port(), None);
+        assert_eq!(Request::get("http://example.com:+80/").port(), None);
+        assert_eq!(Request::get("http://[::1/").port(), None);
+        assert_eq!(Request::get("http://[::1]garbage/").port(), None);
+        assert_eq!(Request::get("http://[::1]:8080/").port(), Some(8080));
+        assert_eq!(Request::get("https://[::1]/").port(), Some(443));
     }
 }

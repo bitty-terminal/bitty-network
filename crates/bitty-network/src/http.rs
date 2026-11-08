@@ -1019,12 +1019,19 @@ fn resolve_redirect(hop_url: &str, location: &str) -> String {
     let Some((scheme, rest)) = hop_url.split_once("://") else {
         return location.to_owned();
     };
+    if location.starts_with("//") {
+        return format!("{scheme}:{location}");
+    }
     let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     if location.starts_with('/') {
         return format!("{scheme}://{authority}{location}");
     }
+    if location.starts_with('#') {
+        let without_fragment = hop_url.split('#').next().unwrap_or(hop_url);
+        return format!("{without_fragment}{location}");
+    }
     let base = hop_url.split(['?', '#']).next().unwrap_or(hop_url);
-    if location.starts_with('?') || location.starts_with('#') {
+    if location.starts_with('?') {
         return format!("{base}{location}");
     }
     let directory = match base.split_once("://") {
@@ -1655,6 +1662,14 @@ mod tests {
         assert_eq!(
             resolve_redirect("http://127.0.0.1:1/a/b?x=1#y", "?x=2"),
             "http://127.0.0.1:1/a/b?x=2"
+        );
+        assert_eq!(
+            resolve_redirect("http://127.0.0.1:1/a/b?x=1#y", "#z"),
+            "http://127.0.0.1:1/a/b?x=1#z"
+        );
+        assert_eq!(
+            resolve_redirect("https://127.0.0.1:1/start", "//127.0.0.1:2/final"),
+            "https://127.0.0.1:2/final"
         );
     }
 
