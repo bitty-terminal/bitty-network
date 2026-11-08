@@ -1014,23 +1014,25 @@ fn read_capped_body(
 fn resolve_redirect(hop_url: &str, location: &str) -> String {
     let location = location.trim();
     if is_absolute_url(location) {
-        return location.to_owned();
+        return normalize_url_dot_segments(location.to_owned());
     }
     let Some((scheme, rest)) = hop_url.split_once("://") else {
         return location.to_owned();
     };
     if location.starts_with("//") {
-        return format!("{scheme}:{location}");
+        return normalize_url_dot_segments(format!("{scheme}:{location}"));
     }
     let authority = rest.split(URL_AUTHORITY_DELIMITERS).next().unwrap_or("");
     if location.starts_with('/') {
-        return format!("{scheme}://{authority}{location}");
+        return normalize_url_dot_segments(format!("{scheme}://{authority}{location}"));
     }
-    if location.starts_with('#') {
+    if location.is_empty() || location.starts_with('#') {
         let without_fragment = hop_url.split('#').next().unwrap_or(hop_url);
-        return format!("{without_fragment}{location}");
+        let normalized_base = normalize_url_dot_segments(without_fragment.to_owned());
+        return format!("{normalized_base}{location}");
     }
-    let base = hop_url.split(['?', '#']).next().unwrap_or(hop_url);
+    let raw_base = hop_url.split(['?', '#']).next().unwrap_or(hop_url);
+    let base = normalize_url_dot_segments(raw_base.to_owned());
     if location.starts_with('?') {
         return format!("{base}{location}");
     }
@@ -1050,7 +1052,53 @@ fn resolve_redirect(hop_url: &str, location: &str) -> String {
         }
         None => format!("{scheme}://{authority}/"),
     };
-    format!("{directory}{location}")
+    normalize_url_dot_segments(format!("{directory}{location}"))
+}
+
+fn normalize_url_dot_segments(url: String) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url;
+    };
+    let Some(path_start) = rest.find(['/', '\\', '?', '#']) else {
+        return url;
+    };
+    let authority = &rest[..path_start];
+    let after_authority = &rest[path_start..];
+    if !after_authority.starts_with('/') {
+        return url;
+    }
+    let (path, tail) = match after_authority.find(['?', '#']) {
+        Some(idx) => (&after_authority[..idx], &after_authority[idx..]),
+        None => (after_authority, ""),
+    };
+    if !path.split('/').any(|seg| seg == "." || seg == "..") {
+        return url;
+    }
+    let mut segments: Vec<&str> = Vec::new();
+    let mut trailing_slash = false;
+    for seg in path.trim_start_matches('/').split('/') {
+        match seg {
+            "" | "." => {
+                trailing_slash = true;
+            }
+            ".." => {
+                segments.pop();
+                trailing_slash = true;
+            }
+            other => {
+                segments.push(other);
+                trailing_slash = false;
+            }
+        }
+    }
+    let normalized_path = if segments.is_empty() {
+        "/".to_owned()
+    } else if trailing_slash {
+        format!("/{}/", segments.join("/"))
+    } else {
+        format!("/{}", segments.join("/"))
+    };
+    format!("{scheme}://{authority}{normalized_path}{tail}")
 }
 
 /// True when `location` is an absolute URL: its first segment (before any
@@ -1670,6 +1718,14 @@ mod tests {
         assert_eq!(
             resolve_redirect("https://127.0.0.1:1/start", "//127.0.0.1:2/final"),
             "https://127.0.0.1:2/final"
+        );
+        // Dot-segment normalization across multi-hop relative redirects
+        let hop1 = resolve_redirect("http://127.0.0.1:1/a/b", "..");
+        assert_eq!(hop1, "http://127.0.0.1:1/");
+        assert_eq!(resolve_redirect(&hop1, "y"), "http://127.0.0.1:1/y");
+        assert_eq!(
+            resolve_redirect("http://127.0.0.1:1/a/start", "./final"),
+            "http://127.0.0.1:1/a/final"
         );
     }
 
