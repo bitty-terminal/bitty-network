@@ -1027,6 +1027,17 @@ fn parse_target(url: &str) -> Result<WsTarget, NetworkError> {
     Ok(WsTarget { host, port, tls })
 }
 
+fn parse_port(port: &str) -> Result<u16, NetworkError> {
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(NetworkError::Offline);
+    }
+    let parsed = port.parse::<u16>().map_err(|_| NetworkError::Offline)?;
+    if parsed == 0 {
+        return Err(NetworkError::Offline);
+    }
+    Ok(parsed)
+}
+
 fn parse_authority(authority: &str, default_port: u16) -> Result<(String, u16), NetworkError> {
     if authority.is_empty()
         || authority.contains('@')
@@ -1043,11 +1054,10 @@ fn parse_authority(authority: &str, default_port: u16) -> Result<(String, u16), 
         }
         let port = match suffix {
             "" => default_port,
-            _ => suffix
-                .strip_prefix(':')
-                .ok_or(NetworkError::Offline)?
-                .parse::<u16>()
-                .map_err(|_| NetworkError::Offline)?,
+            _ => {
+                let raw_port = suffix.strip_prefix(':').ok_or(NetworkError::Offline)?;
+                parse_port(raw_port)?
+            }
         };
         return Ok((host.to_lowercase(), port));
     }
@@ -1055,10 +1065,7 @@ fn parse_authority(authority: &str, default_port: u16) -> Result<(String, u16), 
         return Err(NetworkError::Offline);
     }
     let (host, port) = match authority.split_once(':') {
-        Some((host, port)) => (
-            host,
-            port.parse::<u16>().map_err(|_| NetworkError::Offline)?,
-        ),
+        Some((host, port)) => (host, parse_port(port)?),
         None => (authority, default_port),
     };
     if host.is_empty() {
@@ -1522,6 +1529,9 @@ mod tests {
             "ws://",
             "ws:///no-host",
             "ws://example.com:notaport/",
+            "ws://example.com:0/",
+            "ws://example.com:+80/",
+            "ws://[::1]:0/",
             "ws://example.com\r\nbad",
             "not-a-url",
             "",
